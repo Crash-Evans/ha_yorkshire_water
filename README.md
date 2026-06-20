@@ -108,6 +108,8 @@ For CSV imports, `file_path` must be readable from inside Home Assistant. For ex
 
 Home Assistant may already have created long-term statistics for the live cumulative sensor, so a CSV import can overlap existing statistics. Run a dry run first. If overlap is detected, review the reported requested and overlapping date ranges before using `allow_overwrite: true`.
 
+If the Energy Dashboard shows negative water usage after an earlier bad import, the cumulative statistics stepped backwards. Remove or correct the affected long-term statistics for `sensor.yorkshire_water_estimated_cumulative_usage` in Developer Tools -> Statistics, or restore a recorder backup from before the import. Do not rerun an overwrite import until the dry run reports a non-zero aligned baseline and `negative_dashboard_deltas_avoided: true`.
+
 ## Cost Tracking
 
 Cost sensors are separate from the Energy Dashboard water usage sensor. Home Assistant's Energy Dashboard should use the cumulative water sensor in m³, while the cost sensors are normal monetary sensors in GBP for Lovelace cards, reports, and dashboards.

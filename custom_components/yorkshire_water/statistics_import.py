@@ -61,6 +61,7 @@ class ImportStatisticsPlan:
     statistics: list[dict[str, Any]]
     base_cumulative_m3: float
     base_sum_m3: float
+    first_imported_cumulative_m3: float
     final_cumulative_m3: float
     final_sum_m3: float
     existing_statistics_overlap: bool
@@ -68,6 +69,8 @@ class ImportStatisticsPlan:
     overlap_start_date: date | None
     overlap_end_date: date | None
     base_strategy: str
+    monotonic_validation_passed: bool
+    negative_dashboard_deltas_avoided: bool
 
 
 def parse_yorkshire_water_csv(text: str) -> list[DailyUsageRow]:
@@ -241,13 +244,19 @@ def build_import_statistics_plan(
     timezone: ZoneInfo,
     prior_stats: list[dict[str, Any]] | None = None,
     overlapping_stats: list[dict[str, Any]] | None = None,
+    future_stats: list[dict[str, Any]] | None = None,
+    live_state_m3: float | None = None,
     allow_overwrite: bool = False,
     block_overlap: bool = True,
 ) -> ImportStatisticsPlan:
     """Build an import plan from source rows and existing recorder statistics."""
     prior_stats = prior_stats or []
     overlapping_stats = overlapping_stats or []
-    overlap_start, overlap_end = _overlap_date_range(overlapping_stats)
+    future_stats = future_stats or []
+    overlap_start, overlap_end = _overlap_date_range(
+        overlapping_stats,
+        timezone=timezone,
+    )
     if overlapping_stats and block_overlap and not allow_overwrite:
         raise YorkshireWaterStatisticsImportError(
             _overlap_error_message(
@@ -259,14 +268,14 @@ def build_import_statistics_plan(
             )
         )
 
-    base_cumulative_m3 = 0.0
-    base_sum_m3 = 0.0
-    base_strategy = "started_from_zero"
-    if prior_stats:
-        prior = prior_stats[-1]
-        base_cumulative_m3 = float(prior.get("state") or 0)
-        base_sum_m3 = float(prior.get("sum") or 0)
-        base_strategy = "continued_from_prior_statistic"
+    total_m3 = sum(row.cubic_metres for row in rows)
+    base_cumulative_m3, base_sum_m3, base_strategy = _select_import_baseline(
+        total_m3=total_m3,
+        prior_stats=prior_stats,
+        overlapping_stats=overlapping_stats,
+        future_stats=future_stats,
+        live_state_m3=live_state_m3,
+    )
 
     statistics = build_cumulative_statistics_rows(
         rows,
@@ -275,11 +284,18 @@ def build_import_statistics_plan(
         base_sum_m3=base_sum_m3,
     )
     _validate_statistics_rows(statistics)
+    _validate_existing_statistic_joins(
+        rows=statistics,
+        future_stats=future_stats,
+    )
     return ImportStatisticsPlan(
         daily_rows=rows,
         statistics=statistics,
         base_cumulative_m3=base_cumulative_m3,
         base_sum_m3=base_sum_m3,
+        first_imported_cumulative_m3=float(statistics[1]["state"])
+        if len(statistics) > 1
+        else float(statistics[0]["state"]),
         final_cumulative_m3=float(statistics[-1]["state"]),
         final_sum_m3=float(statistics[-1]["sum"]),
         existing_statistics_overlap=bool(overlapping_stats),
@@ -287,6 +303,8 @@ def build_import_statistics_plan(
         overlap_start_date=overlap_start,
         overlap_end_date=overlap_end,
         base_strategy=base_strategy,
+        monotonic_validation_passed=True,
+        negative_dashboard_deltas_avoided=True,
     )
 
 
@@ -310,8 +328,16 @@ def build_dry_run_report(
         "latest_date": rows[-1].day.isoformat(),
         "total_litres": total_litres,
         "total_m3": round(total_litres / 1000, 6),
+        "baseline_strategy": plan.base_strategy,
+        "baseline_m3": round(plan.base_cumulative_m3, 6),
         "base_cumulative_m3": round(plan.base_cumulative_m3, 6),
+        "first_imported_cumulative_m3": round(
+            plan.first_imported_cumulative_m3,
+            6,
+        ),
         "final_cumulative_m3": round(plan.final_cumulative_m3, 6),
+        "monotonic_validation_passed": plan.monotonic_validation_passed,
+        "negative_dashboard_deltas_avoided": plan.negative_dashboard_deltas_avoided,
         "existing_statistics_overlap": plan.existing_statistics_overlap,
         "overlap_detected": plan.existing_statistics_overlap,
         "overlap_count": plan.overlap_count,
@@ -323,6 +349,7 @@ def build_dry_run_report(
         else None,
         "overlapping_statistic_count": plan.overlap_count,
         "allow_overwrite_would_allow_import": plan.existing_statistics_overlap,
+        "overwrite_behaviour": "recorder_import_updates_matching_statistic_timestamps_only",
         "base_strategy": plan.base_strategy,
     }
 
@@ -401,12 +428,18 @@ async def async_handle_import_statistics(
                 (
                     "Yorkshire Water statistics dry run complete: "
                     "rows=%s total_litres=%s final_cumulative_m3=%s "
+                    "baseline_strategy=%s baseline_m3=%s "
+                    "monotonic=%s negative_deltas_avoided=%s "
                     "overlap=%s overlap_start=%s overlap_end=%s overlap_count=%s "
                     "allow_overwrite_would_allow_import=%s"
                 ),
                 len(rows),
                 report["total_litres"],
                 report["final_cumulative_m3"],
+                report["baseline_strategy"],
+                report["baseline_m3"],
+                report["monotonic_validation_passed"],
+                report["negative_dashboard_deltas_avoided"],
                 plan.existing_statistics_overlap,
                 report["overlapping_start_date"],
                 report["overlapping_end_date"],
@@ -516,52 +549,23 @@ async def _async_prepare_import_plan(
     block_overlap: bool = True,
 ) -> ImportStatisticsPlan:
     """Prepare validated cumulative statistics rows."""
-    from homeassistant.util import dt as dt_util
-
     timezone = ZoneInfo(getattr(hass.config, "time_zone", None) or "UTC")
     base_start = _local_midnight(rows[0].day, timezone)
     import_end = _local_midnight(rows[-1].day + timedelta(days=1), timezone)
 
-    prior_stats, overlapping_stats = await _async_get_existing_statistics(
+    prior_stats, overlapping_stats, future_stats = await _async_get_existing_statistics(
         hass,
         statistic_id,
         base_start,
         import_end,
     )
-    if prior_stats:
-        prior = prior_stats[-1]
-        prior_start = prior.get("start")
-        if isinstance(prior_start, (int, float)):
-            prior_start_text = dt_util.utc_from_timestamp(prior_start).isoformat()
-        else:
-            prior_start_text = str(prior_start)
-        plan = build_import_statistics_plan(
-            rows,
-            timezone=timezone,
-            prior_stats=prior_stats,
-            overlapping_stats=overlapping_stats,
-            allow_overwrite=allow_overwrite,
-            block_overlap=block_overlap,
-        )
-        return ImportStatisticsPlan(
-            daily_rows=plan.daily_rows,
-            statistics=plan.statistics,
-            base_cumulative_m3=plan.base_cumulative_m3,
-            base_sum_m3=plan.base_sum_m3,
-            final_cumulative_m3=plan.final_cumulative_m3,
-            final_sum_m3=plan.final_sum_m3,
-            existing_statistics_overlap=plan.existing_statistics_overlap,
-            overlap_count=plan.overlap_count,
-            overlap_start_date=plan.overlap_start_date,
-            overlap_end_date=plan.overlap_end_date,
-            base_strategy=f"continued_from_prior_statistic_at_{prior_start_text}",
-        )
-
     return build_import_statistics_plan(
         rows,
         timezone=timezone,
         prior_stats=prior_stats,
         overlapping_stats=overlapping_stats,
+        future_stats=future_stats,
+        live_state_m3=_live_state_m3(hass, statistic_id),
         allow_overwrite=allow_overwrite,
         block_overlap=block_overlap,
     )
@@ -572,14 +576,15 @@ async def _async_get_existing_statistics(
     statistic_id: str,
     import_start: datetime,
     import_end: datetime,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return prior and overlapping recorder statistics for a statistic id."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return prior, overlapping, and future recorder statistics."""
     from homeassistant.components.recorder import statistics
     from homeassistant.util import dt as dt_util
 
     earliest = datetime(1970, 1, 1, tzinfo=UTC)
     import_start_utc = dt_util.as_utc(import_start)
     import_end_utc = dt_util.as_utc(import_end + timedelta(seconds=1))
+    future_start_utc = dt_util.as_utc(import_end + timedelta(seconds=1))
     statistic_ids = {statistic_id}
     types = {"state", "sum"}
 
@@ -607,7 +612,23 @@ async def _async_get_existing_statistics(
             types,
         )
     )
-    return prior.get(statistic_id, []), overlap.get(statistic_id, [])
+    future = await hass.async_add_executor_job(
+        functools.partial(
+            statistics.statistics_during_period,
+            hass,
+            future_start_utc,
+            None,
+            statistic_ids,
+            "hour",
+            None,
+            types,
+        )
+    )
+    return (
+        prior.get(statistic_id, []),
+        overlap.get(statistic_id, []),
+        future.get(statistic_id, []),
+    )
 
 
 async def _async_import_statistics_rows(
@@ -668,6 +689,91 @@ def _first_entry_data(hass: Any) -> dict[str, Any]:
     return next(iter(entries.values()))
 
 
+def _select_import_baseline(
+    *,
+    total_m3: float,
+    prior_stats: list[dict[str, Any]],
+    overlapping_stats: list[dict[str, Any]],
+    future_stats: list[dict[str, Any]],
+    live_state_m3: float | None,
+) -> tuple[float, float, str]:
+    """Select a baseline that keeps imported statistics monotonic."""
+    if prior_stats:
+        prior_state, prior_sum = _statistic_cumulative_pair(
+            _latest_statistic(prior_stats)
+        )
+        return prior_state, prior_sum, "prior_statistic"
+
+    if future_stats:
+        future_state, future_sum = _statistic_cumulative_pair(
+            _earliest_statistic(future_stats)
+        )
+        base_state = future_state - total_m3
+        base_sum = future_sum - total_m3
+        if base_state < 0 or base_sum < 0:
+            raise YorkshireWaterStatisticsImportError(
+                "Unable to align import with future statistics without a negative baseline"
+            )
+        return base_state, base_sum, "future_statistic_backfill"
+
+    if live_state_m3 is not None:
+        base_state = live_state_m3 - total_m3
+        if base_state < 0:
+            raise YorkshireWaterStatisticsImportError(
+                "Unable to align import with live state without a negative baseline"
+            )
+        return base_state, base_state, "live_state_baseline"
+
+    if overlapping_stats:
+        overlap_state, overlap_sum = _statistic_cumulative_pair(
+            _earliest_statistic(overlapping_stats)
+        )
+        return overlap_state, overlap_sum, "prior_statistic"
+
+    return 0.0, 0.0, "zero_baseline"
+
+
+def _statistic_cumulative_pair(stat: dict[str, Any]) -> tuple[float, float]:
+    """Return state and sum values from a statistics row, falling back safely."""
+    state = _coerce_optional_statistic_float(stat.get("state"))
+    total = _coerce_optional_statistic_float(stat.get("sum"))
+    if state is None and total is None:
+        raise YorkshireWaterStatisticsImportError(
+            "Existing statistics row is missing state and sum values"
+        )
+    if state is None:
+        state = total
+    if total is None:
+        total = state
+    return float(state), float(total)
+
+
+def _coerce_optional_statistic_float(value: Any) -> float | None:
+    """Coerce an optional statistics value to float."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as err:
+        raise YorkshireWaterStatisticsImportError(
+            "Existing statistics row contains a non-numeric cumulative value"
+        ) from err
+
+
+def _live_state_m3(hass: Any, entity_id: str) -> float | None:
+    """Return the current live cumulative sensor state when available."""
+    states = getattr(hass, "states", None)
+    if states is None:
+        return None
+    state_obj = states.get(entity_id)
+    if state_obj is None:
+        return None
+    try:
+        return float(state_obj.state)
+    except (TypeError, ValueError):
+        return None
+
+
 def _validate_statistics_rows(rows: list[dict[str, Any]]) -> None:
     """Validate prepared recorder rows before import."""
     previous_start: datetime | None = None
@@ -681,6 +787,10 @@ def _validate_statistics_rows(rows: list[dict[str, Any]]) -> None:
             )
         state = float(row["state"])
         total = float(row["sum"])
+        if state < 0 or total < 0:
+            raise YorkshireWaterStatisticsImportError(
+                "Prepared statistics contain a negative cumulative value"
+            )
         if previous_start is not None and start <= previous_start:
             raise YorkshireWaterStatisticsImportError(
                 "Prepared statistics are not chronological"
@@ -698,40 +808,92 @@ def _validate_statistics_rows(rows: list[dict[str, Any]]) -> None:
         previous_sum = total
 
 
+def _validate_existing_statistic_joins(
+    *,
+    rows: list[dict[str, Any]],
+    future_stats: list[dict[str, Any]],
+) -> None:
+    """Validate that generated rows do not step down into future statistics."""
+    if not rows or not future_stats:
+        return
+    final_state = float(rows[-1]["state"])
+    final_sum = float(rows[-1]["sum"])
+    future_state, future_sum = _statistic_cumulative_pair(
+        _earliest_statistic(future_stats)
+    )
+    if final_state > future_state or final_sum > future_sum:
+        raise YorkshireWaterStatisticsImportError(
+            "Generated statistics would create a negative dashboard delta to existing future statistics"
+        )
+
+
+def _earliest_statistic(stats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the earliest statistics row by start date when available."""
+    return min(
+        stats,
+        key=lambda stat: _statistic_start_datetime_utc(stat)
+        or datetime.max.replace(tzinfo=UTC),
+    )
+
+
+def _latest_statistic(stats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the latest statistics row by start date when available."""
+    return max(
+        stats,
+        key=lambda stat: _statistic_start_datetime_utc(stat)
+        or datetime.min.replace(tzinfo=UTC),
+    )
+
+
+def _statistic_start_datetime_utc(stat: dict[str, Any]) -> datetime | None:
+    """Extract a UTC datetime from a Home Assistant statistics row."""
+    value = stat.get("start")
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        start = value
+    elif isinstance(value, date):
+        start = datetime.combine(value, time.min)
+    elif isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=UTC)
+    elif isinstance(value, str):
+        try:
+            start = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if start.tzinfo is None or start.tzinfo.utcoffset(start) is None:
+        start = start.replace(tzinfo=UTC)
+    return start.astimezone(UTC)
+
+
 def _overlap_date_range(
     overlapping_stats: list[dict[str, Any]],
+    *,
+    timezone: ZoneInfo,
 ) -> tuple[date | None, date | None]:
     """Return the safe date range for overlapping statistics."""
     dates = [
         stat_date
         for stat in overlapping_stats
-        if (stat_date := _statistic_start_date(stat)) is not None
+        if (stat_date := _statistic_start_date(stat, timezone=timezone)) is not None
     ]
     if not dates:
         return None, None
     return min(dates), max(dates)
 
 
-def _statistic_start_date(stat: dict[str, Any]) -> date | None:
+def _statistic_start_date(
+    stat: dict[str, Any],
+    *,
+    timezone: ZoneInfo,
+) -> date | None:
     """Extract a date from a Home Assistant statistics row."""
-    value = stat.get("start")
-    if value is None:
+    start = _statistic_start_datetime_utc(stat)
+    if start is None:
         return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=UTC).date()
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
-            except ValueError:
-                return None
-    return None
+    return start.astimezone(timezone).date()
 
 
 def _overlap_error_message(

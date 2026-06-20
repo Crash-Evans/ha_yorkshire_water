@@ -89,6 +89,119 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
         self.assertEqual(stats[2]["sum"], 0.126)
         self.assertIsNotNone(stats[0]["start"].tzinfo)
 
+    def test_import_with_no_existing_stats_starts_from_zero_and_is_monotonic(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+        )
+
+        self.assertEqual(plan.base_strategy, "zero_baseline")
+        self.assertEqual(plan.base_cumulative_m3, 0)
+        self.assertEqual(plan.first_imported_cumulative_m3, 0.094)
+        self.assertEqual(plan.final_cumulative_m3, 0.126)
+        self.assertTrue(plan.monotonic_validation_passed)
+        self.assertTrue(plan.negative_dashboard_deltas_avoided)
+
+    def test_import_with_prior_statistic_uses_prior_baseline(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            prior_stats=[
+                {
+                    "start": datetime(2026, 5, 31, tzinfo=UTC),
+                    "state": 9.527,
+                    "sum": 9.527,
+                }
+            ],
+        )
+
+        self.assertEqual(plan.base_strategy, "prior_statistic")
+        self.assertEqual(plan.base_cumulative_m3, 9.527)
+        self.assertEqual(plan.first_imported_cumulative_m3, 9.621)
+        self.assertEqual(plan.final_cumulative_m3, 9.653)
+
+    def test_import_with_future_statistic_backcalculates_safe_baseline(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            future_stats=[
+                {
+                    "start": datetime(2026, 6, 20, tzinfo=UTC),
+                    "state": 9.527,
+                    "sum": 9.527,
+                }
+            ],
+        )
+
+        self.assertEqual(plan.base_strategy, "future_statistic_backfill")
+        self.assertEqual(plan.base_cumulative_m3, 9.401)
+        self.assertEqual(plan.first_imported_cumulative_m3, 9.495)
+        self.assertEqual(plan.final_cumulative_m3, 9.527)
+        self.assertTrue(plan.negative_dashboard_deltas_avoided)
+
+    def test_import_with_live_state_uses_live_state_baseline(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            live_state_m3=9.527,
+        )
+
+        self.assertEqual(plan.base_strategy, "live_state_baseline")
+        self.assertEqual(plan.final_cumulative_m3, 9.527)
+
+    def test_import_refuses_if_join_to_future_would_decrease(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        with self.assertRaisesRegex(
+            statistics_import.YorkshireWaterStatisticsImportError,
+            "negative dashboard delta",
+        ):
+            statistics_import.build_import_statistics_plan(
+                rows,
+                timezone=ZoneInfo("Europe/London"),
+                prior_stats=[
+                    {
+                        "start": datetime(2026, 5, 31, tzinfo=UTC),
+                        "state": 9.527,
+                        "sum": 9.527,
+                    }
+                ],
+                future_stats=[
+                    {
+                        "start": datetime(2026, 6, 20, tzinfo=UTC),
+                        "state": 9.600,
+                        "sum": 9.600,
+                    }
+                ],
+            )
+
+    def test_import_refuses_future_backfill_negative_baseline(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        with self.assertRaisesRegex(
+            statistics_import.YorkshireWaterStatisticsImportError,
+            "negative baseline",
+        ):
+            statistics_import.build_import_statistics_plan(
+                rows,
+                timezone=ZoneInfo("Europe/London"),
+                future_stats=[
+                    {
+                        "start": datetime(2026, 6, 20, tzinfo=UTC),
+                        "state": 0.1,
+                        "sum": 0.1,
+                    }
+                ],
+            )
+
     def test_build_import_plan_and_dry_run_report(self) -> None:
         rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
         plan = statistics_import.build_import_statistics_plan(
@@ -109,6 +222,11 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
         self.assertEqual(report["total_m3"], 0.126)
         self.assertEqual(report["base_cumulative_m3"], 10.0)
         self.assertEqual(report["final_cumulative_m3"], 10.126)
+        self.assertEqual(report["baseline_strategy"], "prior_statistic")
+        self.assertEqual(report["baseline_m3"], 10.0)
+        self.assertEqual(report["first_imported_cumulative_m3"], 10.094)
+        self.assertTrue(report["monotonic_validation_passed"])
+        self.assertTrue(report["negative_dashboard_deltas_avoided"])
         self.assertFalse(report["existing_statistics_overlap"])
         self.assertFalse(report["overlap_detected"])
         self.assertIsNone(report["overlapping_start_date"])
@@ -191,7 +309,9 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
         self.assertEqual(report["requested_import_end_date"], "2026-06-02")
         self.assertEqual(report["daily_rows_parsed"], 2)
         self.assertEqual(report["total_litres"], 126.0)
-        self.assertEqual(report["final_cumulative_m3"], 0.126)
+        self.assertEqual(report["baseline_strategy"], "prior_statistic")
+        self.assertEqual(report["baseline_m3"], 1.0)
+        self.assertEqual(report["final_cumulative_m3"], 1.126)
         self.assertTrue(report["overlap_detected"])
         self.assertEqual(report["overlapping_start_date"], "2026-06-01")
         self.assertEqual(report["overlapping_end_date"], "2026-06-02")
@@ -214,6 +334,57 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
         self.assertEqual(len(plan.statistics), 3)
         self.assertTrue(plan.existing_statistics_overlap)
         self.assertEqual(plan.overlap_count, 1)
+
+    def test_overlap_import_with_future_baseline_avoids_negative_delta(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+        overlap = [
+            {"start": datetime(2026, 6, 1, tzinfo=UTC), "state": 1.0, "sum": 1.0},
+        ]
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            overlapping_stats=overlap,
+            future_stats=[
+                {
+                    "start": datetime(2026, 6, 20, tzinfo=UTC),
+                    "state": 9.527,
+                    "sum": 9.527,
+                }
+            ],
+            allow_overwrite=True,
+        )
+
+        self.assertEqual(plan.base_strategy, "future_statistic_backfill")
+        self.assertEqual(plan.final_cumulative_m3, 9.527)
+        self.assertTrue(plan.negative_dashboard_deltas_avoided)
+
+    def test_overlap_only_existing_stats_do_not_start_from_zero(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+        overlap = [
+            {
+                "start": datetime(2026, 5, 31, 23, 0, tzinfo=UTC),
+                "state": 6.567,
+                "sum": 6.567,
+            },
+        ]
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            overlapping_stats=overlap,
+            allow_overwrite=True,
+        )
+        report = statistics_import.build_dry_run_report(
+            source="csv",
+            statistic_id="sensor.yorkshire_water_estimated_cumulative_usage",
+            plan=plan,
+        )
+
+        self.assertEqual(plan.base_strategy, "prior_statistic")
+        self.assertEqual(report["baseline_m3"], 6.567)
+        self.assertEqual(report["final_cumulative_m3"], 6.693)
+        self.assertEqual(report["overlapping_start_date"], "2026-06-01")
 
     def test_api_periods_convert_litres_to_m3(self) -> None:
         rows = statistics_import.daily_rows_from_api_periods(
