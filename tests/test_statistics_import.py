@@ -202,6 +202,149 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
                 ],
             )
 
+    def test_unsafe_future_anchor_fails_in_normal_mode_with_diagnostics(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        with self.assertRaisesRegex(
+            statistics_import.YorkshireWaterStatisticsImportError,
+            "negative baseline",
+        ) as err:
+            statistics_import.build_import_statistics_plan(
+                rows,
+                timezone=ZoneInfo("Europe/London"),
+                overlapping_stats=[
+                    {
+                        "start": datetime(2026, 6, 1, tzinfo=UTC),
+                        "state": 0.0,
+                        "sum": 0.0,
+                    }
+                ],
+                future_stats=[
+                    {
+                        "start": datetime(2026, 6, 20, tzinfo=UTC),
+                        "state": 0.1,
+                        "sum": 0.1,
+                    }
+                ],
+                allow_overwrite=True,
+            )
+
+        self.assertTrue(err.exception.diagnostics["future_anchor_appears_corrupted"])
+        self.assertEqual(
+            err.exception.diagnostics["alignment_failed_reason"],
+            "future_anchor_requires_negative_baseline",
+        )
+        self.assertNotIn("/config/", str(err.exception))
+
+    def test_allow_overwrite_still_fails_when_future_anchor_is_unsafe(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        with self.assertRaisesRegex(
+            statistics_import.YorkshireWaterStatisticsImportError,
+            "negative baseline",
+        ):
+            statistics_import.build_import_statistics_plan(
+                rows,
+                timezone=ZoneInfo("Europe/London"),
+                future_stats=[
+                    {
+                        "start": datetime(2026, 6, 20, tzinfo=UTC),
+                        "state": 0.1,
+                        "sum": 0.1,
+                    }
+                ],
+                allow_overwrite=True,
+            )
+
+    def test_repair_mode_plan_only_returns_diagnostics(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            overlapping_stats=[
+                {
+                    "start": datetime(2026, 6, 1, tzinfo=UTC),
+                    "state": 0.0,
+                    "sum": 0.0,
+                }
+            ],
+            future_stats=[
+                {
+                    "start": datetime(2026, 6, 20, tzinfo=UTC),
+                    "state": 0.1,
+                    "sum": 0.1,
+                }
+            ],
+            repair_mode="plan_only",
+            allow_overwrite=True,
+        )
+        report = statistics_import.build_dry_run_report(
+            source="csv",
+            statistic_id="sensor.yorkshire_water_estimated_cumulative_usage",
+            plan=plan,
+        )
+
+        self.assertEqual(report["repair_mode"], "plan_only")
+        self.assertEqual(report["repair_plan"]["affected_start_date"], "2026-06-01")
+        self.assertEqual(report["repair_plan"]["affected_end_date"], "2026-06-02")
+        self.assertTrue(report["repair_plan"]["future_anchor_appears_corrupted"])
+        self.assertEqual(
+            report["repair_plan"]["calculated_required_baseline_m3"],
+            -0.026,
+        )
+
+    def test_repair_mode_ignore_future_anchor_is_explicit(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            overlapping_stats=[
+                {
+                    "start": datetime(2026, 6, 1, tzinfo=UTC),
+                    "state": 5.0,
+                    "sum": 5.0,
+                }
+            ],
+            future_stats=[
+                {
+                    "start": datetime(2026, 6, 20, tzinfo=UTC),
+                    "state": 0.1,
+                    "sum": 0.1,
+                }
+            ],
+            repair_mode="ignore_future_anchor",
+            allow_overwrite=True,
+        )
+
+        self.assertEqual(plan.base_strategy, "prior_statistic")
+        self.assertEqual(plan.base_cumulative_m3, 5.0)
+        self.assertEqual(plan.final_cumulative_m3, 5.126)
+        self.assertTrue(plan.repair_plan["future_anchor_ignored"])
+
+    def test_repair_mode_rebase_from_live_creates_monotonic_rows(self) -> None:
+        rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
+
+        plan = statistics_import.build_import_statistics_plan(
+            rows,
+            timezone=ZoneInfo("Europe/London"),
+            future_stats=[
+                {
+                    "start": datetime(2026, 6, 20, tzinfo=UTC),
+                    "state": 0.1,
+                    "sum": 0.1,
+                }
+            ],
+            live_state_m3=9.527,
+            repair_mode="rebase_from_live",
+            allow_overwrite=True,
+        )
+
+        self.assertEqual(plan.base_strategy, "live_state_baseline")
+        self.assertEqual(plan.final_cumulative_m3, 9.527)
+        self.assertTrue(plan.monotonic_validation_passed)
+
     def test_build_import_plan_and_dry_run_report(self) -> None:
         rows = statistics_import.parse_yorkshire_water_csv(CSV_SAMPLE)
         plan = statistics_import.build_import_statistics_plan(
@@ -430,9 +573,11 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
             *,
             allow_overwrite,
             block_overlap=True,
+            repair_mode="none",
         ):
             captured["allow_overwrite"] = allow_overwrite
             captured["block_overlap"] = block_overlap
+            captured["repair_mode"] = repair_mode
             return plan
 
         original_load = statistics_import._async_load_daily_rows
@@ -466,12 +611,32 @@ class YorkshireWaterStatisticsImportTests(unittest.TestCase):
             statistics_import._async_prepare_import_plan = original_prepare
 
         self.assertIs(captured["block_overlap"], False)
+        self.assertEqual(captured["repair_mode"], "none")
         self.assertTrue(report["overlap_detected"])
         self.assertEqual(report["overlapping_start_date"], "2026-06-01")
         self.assertEqual(report["imported_statistics_rows"], 0)
         log_text = " ".join(logger.messages)
         self.assertNotIn("/config/yorkshire_water/SECRET.csv", log_text)
         self.assertNotIn("SECRET", log_text)
+
+    def test_ignore_future_anchor_handler_rejects_real_import(self) -> None:
+        _install_homeassistant_service_stubs()
+        hass = _FakeHass()
+
+        with self.assertRaisesRegex(Exception, "dry-run only"):
+            asyncio.run(
+                statistics_import.async_handle_import_statistics(
+                    hass,
+                    types.SimpleNamespace(
+                        data={
+                            "source": "csv",
+                            "file_path": "/config/yorkshire_water/SECRET.csv",
+                            "dry_run": False,
+                            "repair_mode": "ignore_future_anchor",
+                        }
+                    ),
+                )
+            )
 
 
 class YorkshireWaterServiceRegistrationTests(unittest.TestCase):
@@ -489,6 +654,7 @@ class YorkshireWaterServiceRegistrationTests(unittest.TestCase):
                 "file_path": "/config/yorkshire_water/June 2026.csv",
                 "dry_run": True,
                 "allow_overwrite": False,
+                "repair_mode": "plan_only",
             }
         )
 
@@ -503,6 +669,7 @@ class YorkshireWaterServiceRegistrationTests(unittest.TestCase):
         )
         self.assertIs(validated["dry_run"], True)
         self.assertIs(validated["allow_overwrite"], False)
+        self.assertEqual(validated["repair_mode"], "plan_only")
 
     def test_service_schema_rejects_invalid_source(self) -> None:
         schema = statistics_import.build_import_statistics_service_schema()

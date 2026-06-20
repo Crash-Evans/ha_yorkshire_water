@@ -21,8 +21,20 @@ CONF_DRY_RUN = "dry_run"
 CONF_END_DATE = "end_date"
 CONF_ENTITY_ID = "entity_id"
 CONF_FILE_PATH = "file_path"
+CONF_REPAIR_MODE = "repair_mode"
 CONF_SOURCE = "source"
 CONF_START_DATE = "start_date"
+
+REPAIR_MODE_NONE = "none"
+REPAIR_MODE_PLAN_ONLY = "plan_only"
+REPAIR_MODE_IGNORE_FUTURE_ANCHOR = "ignore_future_anchor"
+REPAIR_MODE_REBASE_FROM_LIVE = "rebase_from_live"
+REPAIR_MODES = (
+    REPAIR_MODE_NONE,
+    REPAIR_MODE_PLAN_ONLY,
+    REPAIR_MODE_IGNORE_FUTURE_ANCHOR,
+    REPAIR_MODE_REBASE_FROM_LIVE,
+)
 
 SOURCE_API = "api"
 SOURCE_CSV = "csv"
@@ -36,6 +48,16 @@ _CURRENCY_PREFIXES = ("£", "GBP")
 
 class YorkshireWaterStatisticsImportError(ValueError):
     """Raised when historical statistics import data is not safe to import."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize the error with optional safe diagnostics."""
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -71,6 +93,8 @@ class ImportStatisticsPlan:
     base_strategy: str
     monotonic_validation_passed: bool
     negative_dashboard_deltas_avoided: bool
+    repair_mode: str
+    repair_plan: dict[str, Any] | None
 
 
 def parse_yorkshire_water_csv(text: str) -> list[DailyUsageRow]:
@@ -246,6 +270,7 @@ def build_import_statistics_plan(
     overlapping_stats: list[dict[str, Any]] | None = None,
     future_stats: list[dict[str, Any]] | None = None,
     live_state_m3: float | None = None,
+    repair_mode: str = REPAIR_MODE_NONE,
     allow_overwrite: bool = False,
     block_overlap: bool = True,
 ) -> ImportStatisticsPlan:
@@ -253,6 +278,7 @@ def build_import_statistics_plan(
     prior_stats = prior_stats or []
     overlapping_stats = overlapping_stats or []
     future_stats = future_stats or []
+    _validate_repair_mode(repair_mode)
     overlap_start, overlap_end = _overlap_date_range(
         overlapping_stats,
         timezone=timezone,
@@ -269,12 +295,58 @@ def build_import_statistics_plan(
         )
 
     total_m3 = sum(row.cubic_metres for row in rows)
-    base_cumulative_m3, base_sum_m3, base_strategy = _select_import_baseline(
+    diagnostics = _build_repair_diagnostics(
+        rows=rows,
+        timezone=timezone,
         total_m3=total_m3,
         prior_stats=prior_stats,
         overlapping_stats=overlapping_stats,
         future_stats=future_stats,
         live_state_m3=live_state_m3,
+    )
+    if repair_mode == REPAIR_MODE_PLAN_ONLY:
+        return _build_plan_only_import_statistics_plan(
+            rows=rows,
+            timezone=timezone,
+            overlapping_stats=overlapping_stats,
+            overlap_start=overlap_start,
+            overlap_end=overlap_end,
+            repair_plan=diagnostics,
+        )
+
+    baseline_future_stats = future_stats
+    baseline_live_state_m3 = live_state_m3
+    if repair_mode == REPAIR_MODE_IGNORE_FUTURE_ANCHOR:
+        baseline_future_stats = []
+        diagnostics = {
+            **diagnostics,
+            "suggested_strategy": REPAIR_MODE_IGNORE_FUTURE_ANCHOR,
+            "future_anchor_ignored": True,
+        }
+    elif repair_mode == REPAIR_MODE_REBASE_FROM_LIVE:
+        baseline_future_stats = []
+        if live_state_m3 is None:
+            raise YorkshireWaterStatisticsImportError(
+                "Repair mode rebase_from_live requires a numeric live cumulative sensor state",
+                diagnostics={
+                    **diagnostics,
+                    "alignment_failed_reason": "live_state_unavailable",
+                },
+            )
+        diagnostics = {
+            **diagnostics,
+            "suggested_strategy": REPAIR_MODE_REBASE_FROM_LIVE,
+            "future_anchor_ignored": bool(future_stats),
+        }
+
+    base_cumulative_m3, base_sum_m3, base_strategy = _select_import_baseline(
+        total_m3=total_m3,
+        prior_stats=prior_stats,
+        overlapping_stats=overlapping_stats,
+        future_stats=baseline_future_stats,
+        live_state_m3=baseline_live_state_m3,
+        prefer_live_state=repair_mode == REPAIR_MODE_REBASE_FROM_LIVE,
+        diagnostics=diagnostics,
     )
 
     statistics = build_cumulative_statistics_rows(
@@ -286,8 +358,15 @@ def build_import_statistics_plan(
     _validate_statistics_rows(statistics)
     _validate_existing_statistic_joins(
         rows=statistics,
-        future_stats=future_stats,
+        future_stats=[] if repair_mode != REPAIR_MODE_NONE else future_stats,
+        diagnostics=diagnostics,
     )
+    diagnostics = {
+        **diagnostics,
+        "selected_baseline_strategy": base_strategy,
+        "selected_baseline_m3": round(base_cumulative_m3, 6),
+        "final_imported_cumulative_m3": round(float(statistics[-1]["state"]), 6),
+    }
     return ImportStatisticsPlan(
         daily_rows=rows,
         statistics=statistics,
@@ -305,6 +384,8 @@ def build_import_statistics_plan(
         base_strategy=base_strategy,
         monotonic_validation_passed=True,
         negative_dashboard_deltas_avoided=True,
+        repair_mode=repair_mode,
+        repair_plan=diagnostics,
     )
 
 
@@ -317,6 +398,7 @@ def build_dry_run_report(
     """Build a safe service response for dry runs and completed imports."""
     rows = plan.daily_rows
     total_litres = round(sum(row.litres for row in rows), 3)
+    repair_plan = plan.repair_plan or {}
     return {
         "source": source,
         "statistic_id": statistic_id,
@@ -351,6 +433,23 @@ def build_dry_run_report(
         "allow_overwrite_would_allow_import": plan.existing_statistics_overlap,
         "overwrite_behaviour": "recorder_import_updates_matching_statistic_timestamps_only",
         "base_strategy": plan.base_strategy,
+        "repair_mode": plan.repair_mode,
+        "repair_plan": plan.repair_plan,
+        "prior_statistic": repair_plan.get("prior_statistic"),
+        "first_overlapping_statistic": repair_plan.get(
+            "first_overlapping_statistic"
+        ),
+        "latest_overlapping_statistic": repair_plan.get(
+            "latest_overlapping_statistic"
+        ),
+        "future_statistic": repair_plan.get("future_statistic"),
+        "calculated_required_baseline_m3": repair_plan.get(
+            "calculated_required_baseline_m3"
+        ),
+        "alignment_failed_reason": repair_plan.get("alignment_failed_reason"),
+        "future_anchor_appears_corrupted": repair_plan.get(
+            "future_anchor_appears_corrupted"
+        ),
     }
 
 
@@ -372,6 +471,9 @@ def build_import_statistics_service_schema() -> Any:
             vol.Optional(CONF_FILE_PATH): cv.string,
             vol.Optional(CONF_DRY_RUN, default=True): cv.boolean,
             vol.Optional(CONF_ALLOW_OVERWRITE, default=False): cv.boolean,
+            vol.Optional(CONF_REPAIR_MODE, default=REPAIR_MODE_NONE): vol.In(
+                REPAIR_MODES
+            ),
         }
     )
 
@@ -389,13 +491,23 @@ async def async_handle_import_statistics(
     source = data[CONF_SOURCE]
     dry_run = data.get(CONF_DRY_RUN, True)
     allow_overwrite = data.get(CONF_ALLOW_OVERWRITE, False)
+    repair_mode = data.get(CONF_REPAIR_MODE, REPAIR_MODE_NONE)
+
+    if repair_mode == REPAIR_MODE_IGNORE_FUTURE_ANCHOR and not dry_run:
+        raise ServiceValidationError(
+            "repair_mode ignore_future_anchor is dry-run only; run plan_only or rebase_from_live for repair planning"
+        )
 
     _safe_import_log(
         hass,
-        "Yorkshire Water statistics import started: source=%s dry_run=%s allow_overwrite=%s",
+        (
+            "Yorkshire Water statistics import started: "
+            "source=%s dry_run=%s allow_overwrite=%s repair_mode=%s"
+        ),
         source,
         dry_run,
         allow_overwrite,
+        repair_mode,
     )
 
     try:
@@ -413,6 +525,7 @@ async def async_handle_import_statistics(
             rows,
             allow_overwrite=allow_overwrite,
             block_overlap=not dry_run,
+            repair_mode=repair_mode,
         )
         report = build_dry_run_report(
             source=source,
@@ -421,8 +534,9 @@ async def async_handle_import_statistics(
         )
         report["dry_run"] = dry_run
         report["allow_overwrite"] = allow_overwrite
-        if dry_run:
+        if dry_run or repair_mode == REPAIR_MODE_PLAN_ONLY:
             report["imported_statistics_rows"] = 0
+            report["dry_run"] = True
             _safe_import_log(
                 hass,
                 (
@@ -458,7 +572,7 @@ async def async_handle_import_statistics(
         )
         return report
     except YorkshireWaterStatisticsImportError as err:
-        raise ServiceValidationError(str(err)) from err
+        raise ServiceValidationError(_format_error_with_diagnostics(err)) from err
     except YorkshireWaterEndpointNotConfiguredError as err:
         raise ServiceValidationError(str(err)) from err
     except YorkshireWaterSchemaError as err:
@@ -547,6 +661,7 @@ async def _async_prepare_import_plan(
     *,
     allow_overwrite: bool,
     block_overlap: bool = True,
+    repair_mode: str = REPAIR_MODE_NONE,
 ) -> ImportStatisticsPlan:
     """Prepare validated cumulative statistics rows."""
     timezone = ZoneInfo(getattr(hass.config, "time_zone", None) or "UTC")
@@ -566,6 +681,7 @@ async def _async_prepare_import_plan(
         overlapping_stats=overlapping_stats,
         future_stats=future_stats,
         live_state_m3=_live_state_m3(hass, statistic_id),
+        repair_mode=repair_mode,
         allow_overwrite=allow_overwrite,
         block_overlap=block_overlap,
     )
@@ -696,8 +812,31 @@ def _select_import_baseline(
     overlapping_stats: list[dict[str, Any]],
     future_stats: list[dict[str, Any]],
     live_state_m3: float | None,
+    prefer_live_state: bool = False,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[float, float, str]:
     """Select a baseline that keeps imported statistics monotonic."""
+    if prefer_live_state:
+        if live_state_m3 is None:
+            raise YorkshireWaterStatisticsImportError(
+                "Repair mode rebase_from_live requires a numeric live cumulative sensor state",
+                diagnostics={
+                    **(diagnostics or {}),
+                    "alignment_failed_reason": "live_state_unavailable",
+                },
+            )
+        base_state = live_state_m3 - total_m3
+        if base_state < 0:
+            raise YorkshireWaterStatisticsImportError(
+                "Unable to align import with live state without a negative baseline",
+                diagnostics={
+                    **(diagnostics or {}),
+                    "alignment_failed_reason": "live_state_requires_negative_baseline",
+                    "calculated_required_baseline_m3": round(base_state, 6),
+                },
+            )
+        return base_state, base_state, "live_state_baseline"
+
     if prior_stats:
         prior_state, prior_sum = _statistic_cumulative_pair(
             _latest_statistic(prior_stats)
@@ -712,7 +851,13 @@ def _select_import_baseline(
         base_sum = future_sum - total_m3
         if base_state < 0 or base_sum < 0:
             raise YorkshireWaterStatisticsImportError(
-                "Unable to align import with future statistics without a negative baseline"
+                "Unable to align import with future statistics without a negative baseline",
+                diagnostics={
+                    **(diagnostics or {}),
+                    "alignment_failed_reason": "future_anchor_requires_negative_baseline",
+                    "calculated_required_baseline_m3": round(base_state, 6),
+                    "future_anchor_appears_corrupted": True,
+                },
             )
         return base_state, base_sum, "future_statistic_backfill"
 
@@ -720,7 +865,12 @@ def _select_import_baseline(
         base_state = live_state_m3 - total_m3
         if base_state < 0:
             raise YorkshireWaterStatisticsImportError(
-                "Unable to align import with live state without a negative baseline"
+                "Unable to align import with live state without a negative baseline",
+                diagnostics={
+                    **(diagnostics or {}),
+                    "alignment_failed_reason": "live_state_requires_negative_baseline",
+                    "calculated_required_baseline_m3": round(base_state, 6),
+                },
             )
         return base_state, base_state, "live_state_baseline"
 
@@ -731,6 +881,185 @@ def _select_import_baseline(
         return overlap_state, overlap_sum, "prior_statistic"
 
     return 0.0, 0.0, "zero_baseline"
+
+
+def _validate_repair_mode(repair_mode: str) -> None:
+    """Validate a repair mode."""
+    if repair_mode not in REPAIR_MODES:
+        raise YorkshireWaterStatisticsImportError(
+            f"Unsupported repair_mode: {repair_mode}"
+        )
+
+
+def _build_plan_only_import_statistics_plan(
+    *,
+    rows: list[DailyUsageRow],
+    timezone: ZoneInfo,
+    overlapping_stats: list[dict[str, Any]],
+    overlap_start: date | None,
+    overlap_end: date | None,
+    repair_plan: dict[str, Any],
+) -> ImportStatisticsPlan:
+    """Build a non-importing repair plan response."""
+    total_m3 = sum(row.cubic_metres for row in rows)
+    baseline = 0.0
+    if overlapping_stats:
+        baseline, _sum = _statistic_cumulative_pair(_earliest_statistic(overlapping_stats))
+    statistics = build_cumulative_statistics_rows(
+        rows,
+        timezone=timezone,
+        base_cumulative_m3=baseline,
+        base_sum_m3=baseline,
+    )
+    _validate_statistics_rows(statistics)
+    return ImportStatisticsPlan(
+        daily_rows=rows,
+        statistics=statistics,
+        base_cumulative_m3=baseline,
+        base_sum_m3=baseline,
+        first_imported_cumulative_m3=float(statistics[1]["state"])
+        if len(statistics) > 1
+        else float(statistics[0]["state"]),
+        final_cumulative_m3=float(statistics[-1]["state"]),
+        final_sum_m3=float(statistics[-1]["sum"]),
+        existing_statistics_overlap=bool(overlapping_stats),
+        overlap_count=len(overlapping_stats),
+        overlap_start_date=overlap_start,
+        overlap_end_date=overlap_end,
+        base_strategy="repair_plan_only",
+        monotonic_validation_passed=True,
+        negative_dashboard_deltas_avoided=False,
+        repair_mode=REPAIR_MODE_PLAN_ONLY,
+        repair_plan={
+            **repair_plan,
+            "csv_total_m3": round(total_m3, 6),
+            "suggested_strategy": _suggest_repair_strategy(repair_plan),
+        },
+    )
+
+
+def _build_repair_diagnostics(
+    *,
+    rows: list[DailyUsageRow],
+    timezone: ZoneInfo,
+    total_m3: float,
+    prior_stats: list[dict[str, Any]],
+    overlapping_stats: list[dict[str, Any]],
+    future_stats: list[dict[str, Any]],
+    live_state_m3: float | None,
+) -> dict[str, Any]:
+    """Build safe repair diagnostics for dry-runs and failures."""
+    prior = _latest_statistic(prior_stats) if prior_stats else None
+    first_overlap = _earliest_statistic(overlapping_stats) if overlapping_stats else None
+    latest_overlap = _latest_statistic(overlapping_stats) if overlapping_stats else None
+    future = _earliest_statistic(future_stats) if future_stats else None
+    future_state = _safe_stat_value(future, "state") if future else None
+    required_baseline = (
+        round(float(future_state) - total_m3, 6)
+        if future_state is not None
+        else None
+    )
+    future_corrupted = bool(
+        future
+        and (
+            (required_baseline is not None and required_baseline < 0)
+            or bool(overlapping_stats)
+        )
+    )
+    return {
+        "import_start_date": rows[0].day.isoformat(),
+        "import_end_date": rows[-1].day.isoformat(),
+        "affected_start_date": rows[0].day.isoformat(),
+        "affected_end_date": rows[-1].day.isoformat(),
+        "csv_total_m3": round(total_m3, 6),
+        "prior_statistic": _statistic_summary(prior, timezone=timezone),
+        "first_overlapping_statistic": _statistic_summary(
+            first_overlap,
+            timezone=timezone,
+        ),
+        "latest_overlapping_statistic": _statistic_summary(
+            latest_overlap,
+            timezone=timezone,
+        ),
+        "future_statistic": _statistic_summary(future, timezone=timezone),
+        "live_state_m3": round(live_state_m3, 6)
+        if live_state_m3 is not None
+        else None,
+        "calculated_required_baseline_m3": required_baseline,
+        "alignment_failed_reason": None,
+        "future_anchor_appears_corrupted": future_corrupted,
+        "future_anchor_unsafe": future_corrupted,
+    }
+
+
+def _suggest_repair_strategy(diagnostics: dict[str, Any]) -> str:
+    """Suggest a safe next repair strategy."""
+    if diagnostics.get("live_state_m3") is not None:
+        return REPAIR_MODE_REBASE_FROM_LIVE
+    if diagnostics.get("prior_statistic") or diagnostics.get(
+        "first_overlapping_statistic"
+    ):
+        return REPAIR_MODE_IGNORE_FUTURE_ANCHOR
+    return "restore_recorder_backup"
+
+
+def _statistic_summary(
+    stat: dict[str, Any] | None,
+    *,
+    timezone: ZoneInfo,
+) -> dict[str, Any] | None:
+    """Return a safe statistic summary."""
+    if not stat:
+        return None
+    return {
+        "date": _statistic_start_date(stat, timezone=timezone).isoformat()
+        if _statistic_start_date(stat, timezone=timezone)
+        else None,
+        "state_m3": _safe_stat_value(stat, "state"),
+        "sum_m3": _safe_stat_value(stat, "sum"),
+    }
+
+
+def _safe_stat_value(stat: dict[str, Any] | None, key: str) -> float | None:
+    """Return a rounded statistics value without raising."""
+    if not stat:
+        return None
+    value = _coerce_optional_statistic_float(stat.get(key))
+    return round(value, 6) if value is not None else None
+
+
+def _format_error_with_diagnostics(err: YorkshireWaterStatisticsImportError) -> str:
+    """Format a safe service validation message."""
+    if not err.diagnostics:
+        return str(err)
+    diagnostics = {
+        **err.diagnostics,
+        "suggested_strategy": err.diagnostics.get("suggested_strategy")
+        or _suggest_repair_strategy(err.diagnostics),
+    }
+    fields = [
+        "import_start_date",
+        "import_end_date",
+        "csv_total_m3",
+        "calculated_required_baseline_m3",
+        "alignment_failed_reason",
+        "future_anchor_appears_corrupted",
+        "suggested_strategy",
+    ]
+    details = {
+        key: diagnostics.get(key)
+        for key in fields
+        if key in diagnostics
+    }
+    for key in (
+        "prior_statistic",
+        "first_overlapping_statistic",
+        "latest_overlapping_statistic",
+        "future_statistic",
+    ):
+        if diagnostics.get(key):
+            details[key] = diagnostics[key]
+    return f"{err}; diagnostics={details}"
 
 
 def _statistic_cumulative_pair(stat: dict[str, Any]) -> tuple[float, float]:
@@ -812,6 +1141,7 @@ def _validate_existing_statistic_joins(
     *,
     rows: list[dict[str, Any]],
     future_stats: list[dict[str, Any]],
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
     """Validate that generated rows do not step down into future statistics."""
     if not rows or not future_stats:
@@ -823,7 +1153,12 @@ def _validate_existing_statistic_joins(
     )
     if final_state > future_state or final_sum > future_sum:
         raise YorkshireWaterStatisticsImportError(
-            "Generated statistics would create a negative dashboard delta to existing future statistics"
+            "Generated statistics would create a negative dashboard delta to existing future statistics",
+            diagnostics={
+                **(diagnostics or {}),
+                "alignment_failed_reason": "generated_rows_exceed_future_anchor",
+                "future_anchor_appears_corrupted": True,
+            },
         )
 
 

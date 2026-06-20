@@ -110,6 +110,10 @@ Home Assistant may already have created long-term statistics for the live cumula
 
 If the Energy Dashboard shows negative water usage after an earlier bad import, the cumulative statistics stepped backwards. Remove or correct the affected long-term statistics for `sensor.yorkshire_water_estimated_cumulative_usage` in Developer Tools -> Statistics, or restore a recorder backup from before the import. Do not rerun an overwrite import until the dry run reports a non-zero aligned baseline and `negative_dashboard_deltas_avoided: true`.
 
+`allow_overwrite: true` does not override monotonic safety. If existing future statistics are already corrupted or too low, the import may still refuse to run and return repair diagnostics. Start with `repair_mode: plan_only` to review the affected date range, prior statistic, overlapping statistics, future statistic, required baseline, and suggested repair strategy.
+
+Repair modes are advanced and should be dry-run first. `repair_mode: ignore_future_anchor` is dry-run only and shows what the import would look like if an unsafe future anchor were ignored. `repair_mode: rebase_from_live` uses the current live cumulative sensor value as the anchor when that can create non-negative, internally monotonic rows. The safest recovery remains restoring a recorder backup from before the bad import.
+
 ## Cost Tracking
 
 Cost sensors are separate from the Energy Dashboard water usage sensor. Home Assistant's Energy Dashboard should use the cumulative water sensor in m³, while the cost sensors are normal monetary sensors in GBP for Lovelace cards, reports, and dashboards.
