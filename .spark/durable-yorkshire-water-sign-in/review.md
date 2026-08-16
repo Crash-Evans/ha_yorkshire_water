@@ -139,3 +139,18 @@ All automated checks passed:
 - [x] All plan deviations documented and accepted
 - [x] Test suite runs green
 - [x] Status set to `passed`
+
+## 8. Follow-up commit re-review: `8fa1394` (2026-08-16)
+
+The follow-up commit was reviewed against the approved spec/plan and the prior passed review. It replaces the raw `vol.In` auth-method schemas in initial setup and reauthentication with native `SelectSelector` list options carrying descriptive labels: `Guided Yorkshire Water sign-in` first and `Use a temporary access token (advanced)` second. The change is limited to the intended UI labeling surface; it preserves the guided-first default and existing routing values. The dependency-free smoke loader now stubs the selector classes and asserts the selector helper and both labels are present.
+
+The updated QA report correctly records the deployed guided flow and keeps provider-backed connection, renewal, reauthentication/status, and 30-day criteria blocked without approved provider fixtures. One evidence caveat remains: its input names deployed commit `a298232`, which predates `8fa1394`; therefore the radio-label observation is not independently proven against the follow-up commit until that commit is deployed and the browser check is rerun. Its QA status remains failed/not ready for host acceptance; this is a QA evidence gap, not a new code-review Blocker or Major.
+
+Automated checks rerun after `8fa1394`:
+
+- `python -m compileall -q custom_components/yorkshire_water`
+- `python tests/smoke_response_shapes.py` (`response shape smoke ok`)
+- `python -m unittest discover -s tests -p 'test_*.py'` (28 tests, all passed)
+- `git diff --check`
+
+No new Blocker or Major finding was introduced. F5 remains the accepted non-blocking Minor test-depth follow-up, and the review status remains `passed`.

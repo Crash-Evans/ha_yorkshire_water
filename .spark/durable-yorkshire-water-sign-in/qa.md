@@ -4,7 +4,7 @@
 |---|---|
 | **Phase** | Review (hands-on) |
 | **Owner** | QA Tester (`/demo-day`) |
-| **Input** | `http://homeassistant.local:8123`, approved spec and plan, deployed commit `a298232` |
+| **Input** | `http://homeassistant.local:8123`, approved spec and plan, deployed follow-up commit `8fa1394` |
 | **Status** | `failed` |
 | **Date** | 2026-08-16 |
 
@@ -14,7 +14,7 @@
 - **Browser / viewport(s):** Fresh Playwright MCP Chrome session; desktop and mobile `390x844`.
 - **Test data / accounts used:** Authenticated Home Assistant administrator; no Yorkshire Water credentials, second HA user, or provider renewal fixture.
 
-The live runtime now serves the approved guided flow. The old beta schema is gone: the initial flow presents `guided` and `temporary_token` choices, and the guided callback step schema contains only required `oauth_callback_url` plus the generated link placeholders. UI-only journeys were tested at both viewports. Provider success, renewal, native reauth, and status-entity paths remain untestable without a valid provider account/fixture.
+The live runtime now serves the approved guided flow. The old beta schema is gone: the initial flow presents descriptive choices `Guided Yorkshire Water sign-in` and `Use a temporary access token (advanced)`, and the guided callback step contains the generated external sign-in link, selectable URL, and required callback field. The follow-up label fix was verified in fresh desktop and mobile browser sessions. Provider success, renewal, native reauth, and status-entity paths remain untestable without a valid provider account/fixture.
 
 ## 2. Acceptance Criteria Verification
 
@@ -30,7 +30,7 @@ The live runtime now serves the approved guided flow. The old beta schema is gon
 | AC-2.5 | No provider outage/timeout fixture available. | ⏸ blocked |
 | AC-2.6 | Admin setup works; no second non-admin session supplied. | ⏸ blocked |
 | AC-2.7 | Focused the external link, tabbed to the selectable URL link, then tabbed to the callback textbox; native labels/order observed. | ✅ pass |
-| AC-2.8 | Invalid callback produced `Start again`; with a callback value and Start again checked, submit generated a fresh authorization URL with new challenge/state and removed the checkbox. | ✅ pass |
+| AC-2.8 | Desktop: invalid callback produced `Start again`; with a callback value and Start again checked, submit generated a fresh authorization URL with new challenge/state and removed the checkbox. Mobile malformed state also exposed `Start again`; the shared browser session was closed before repeating the restart click there. | ✅ pass (desktop) |
 | AC-2.9 | No provider denial/cancellation response available. | ⏸ blocked |
 | AC-3.1 | No provider-supported connected entry or expiry fixture. | ⏸ blocked |
 | AC-3.2 | No replacement-token renewal fixture. | ⏸ blocked |
@@ -46,7 +46,7 @@ The live runtime now serves the approved guided flow. The old beta schema is gon
 | AC-5.1 | No existing bearer-token entry supplied. | ⏸ blocked |
 | AC-5.2 | No existing bearer reauth entry supplied. | ⏸ blocked |
 | AC-5.3 | No migration fixture supplied. | ⏸ blocked |
-| AC-6.1 | Hierarchy works: guided is selected first; choosing the second option opens `Use a temporary access token (advanced)` with an explicit temporary-lifetime warning. The follow-up fix supplies descriptive radio labels for both choices. | ✅ pass |
+| AC-6.1 | Fresh desktop and mobile setup dialogs both selected guided first and exposed descriptive native radio names `Guided Yorkshire Water sign-in` and `Use a temporary access token (advanced)`. | ✅ pass |
 | AC-6.2 | No valid temporary token supplied. | ⏸ blocked |
 | AC-6.3 | No fallback entry available to expire. | ⏸ blocked |
 | AC-6.4 | Guided form/callback step contains no OAuth, PKCE, token, verifier, scope, or refresh-token terminology. | ✅ pass |
@@ -69,11 +69,11 @@ The live runtime now serves the approved guided flow. The old beta schema is gon
 
 | # | Severity | Steps to reproduce | Expected vs. observed | Status |
 |---|---|---|---|---|
-| B1 | Minor | Add integration → Yorkshire Water; inspect the initial `Sign-in method` radiogroup at desktop or mobile size | The prior deployed form exposed raw `guided` and `temporary_token` names. The follow-up fix replaces the legacy `vol.In` field with labelled native selector options; rerun browser verification after deployment. | fixed |
+| B1 | Minor | Add integration → Yorkshire Water; inspect the initial `Sign-in method` radiogroup at desktop or mobile size | The prior deployed form exposed raw `guided` and `temporary_token` names. Fresh verification on follow-up commit `8fa1394` shows descriptive labels at both desktop and mobile sizes. | fixed |
 
 ## 4. Console & Network
 
-- Browser console after page load and all tested setup/callback/fallback actions: **0 messages, 0 errors, 0 warnings**.
+- Browser console after the fresh page load and tested setup/callback actions: **0 messages, 0 errors, 0 warnings** (the earlier session also recorded a clean console for fallback actions).
 - Flow POSTs and cleanup DELETEs returned HTTP 200.
 - Guided flow response schema: required `oauth_callback_url`; placeholders for the labelled external Markdown link and selectable authorization URL.
 - Malformed callback response: `oauth_callback_invalid`, with optional `oauth_start_again`.
@@ -83,9 +83,9 @@ The live runtime now serves the approved guided flow. The old beta schema is gon
 
 ## 5. Verdict
 
-> **“The deployed runtime serves the approved guided and advanced fallback journeys, and the browser-observable callback/restart behavior works at desktop and mobile sizes. The radio-label defect is fixed in the follow-up commit, but provider-backed connection, renewal, native reauthentication/status, and 30-day durability criteria remain unverified without a valid provider fixture.”**
+> **“The deployed runtime now serves descriptive guided and advanced sign-in choices, and the browser-observable guided callback, malformed-input recovery, and desktop restart behavior work; mobile callback validation also reached the expected recoverable error state. The radio-label defect is fixed in follow-up commit `8fa1394`, but provider-backed connection, renewal, native reauthentication/status, and 30-day durability criteria remain unverified without a valid provider fixture.”**
 
-Deploy the follow-up radio-label fix, then rerun the provider-backed and native lifecycle/status checks with approved test data. Do not mark the QA gate passed while Must-story criteria remain blocked.
+The follow-up radio-label fix is visible in the live runtime. Rerun the provider-backed and native lifecycle/status checks with approved test data. Do not mark the QA gate passed while Must-story criteria remain blocked.
 
 ---
 
