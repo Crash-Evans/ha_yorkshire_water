@@ -4,7 +4,7 @@
 |---|---|
 | **Phase** | Review (hands-on) |
 | **Owner** | QA Tester (`/demo-day`) |
-| **Input** | `http://homeassistant.local:8123`, approved spec and plan |
+| **Input** | `http://homeassistant.local:8123`, approved spec and plan, deployed commit `a298232` |
 | **Status** | `failed` |
 | **Date** | 2026-08-16 |
 
@@ -12,79 +12,80 @@
 
 - **App URL:** `http://homeassistant.local:8123`
 - **Browser / viewport(s):** Fresh Playwright MCP Chrome session; desktop and mobile `390x844`.
-- **Test data / accounts used:** Authenticated Home Assistant administrator; no Yorkshire Water credentials/provider fixture.
+- **Test data / accounts used:** Authenticated Home Assistant administrator; no Yorkshire Water credentials, second HA user, or provider renewal fixture.
 
-This is a fresh rerun after the runtime update opportunity. Home Assistant overview and `/config/integrations` load successfully. The live Yorkshire Water flow remains the old beta flow; the approved guided implementation is not loaded.
+The live runtime now serves the approved guided flow. The old beta schema is gone: the initial flow presents `guided` and `temporary_token` choices, and the guided callback step schema contains only required `oauth_callback_url` plus the generated link placeholders. UI-only journeys were tested at both viewports. Provider success, renewal, native reauth, and status-entity paths remain untestable without a valid provider account/fixture.
 
 ## 2. Acceptance Criteria Verification
 
-`pass` means directly observed in the live browser. `fail` means the live browser contradicted the criterion. `blocked` means the required provider credential, second account, existing entry, or approved flow was unavailable.
-
 | Spec ID | Steps performed and observed result | Result |
 |---|---|---|
-| AC-1.1 | Opened Add integration → Yorkshire Water; `Experimental: request offline access / refresh token` is visible. | ❌ fail |
-| AC-1.2 | Searched the live setup for capability/evidence review; none exists. | ⏸ blocked |
-| AC-1.3 | Opened supported sign-in; approved guided unsupported-persistence messaging is absent. | ⏸ blocked |
-| AC-2.1 | Setup form visibly requests temporary token, token JSON, callback, OAuth code, and PKCE verifier; description mentions DevTools. | ❌ fail |
-| AC-2.2 | No descriptively labelled Yorkshire Water external sign-in link or selectable generated URL is present. | ❌ fail |
-| AC-2.3 | Submitted callback-only fake URL; old form returned `Enter valid experimental OAuth callback/code details`, with no connection. | ❌ fail |
-| AC-2.4 | Submitted empty setup and observed `Enter a valid access token`; callback journey is not the approved correctable flow. | ❌ fail |
-| AC-2.5 | No provider journey/fixture available for timeout or retry-later test. | ⏸ blocked |
-| AC-2.6 | Admin setup is accessible; no second non-admin session was supplied. | ⏸ blocked |
-| AC-2.7 | No guided link exists, so required link → callback → submit keyboard order cannot be verified. | ❌ fail |
-| AC-2.8 | No active guided attempt or `Start again` control exists. | ❌ fail |
-| AC-2.9 | No provider denial/cancellation journey is available. | ⏸ blocked |
-| AC-3.1 | No connected provider-supported entry/fixture is available for token-expiry renewal. | ⏸ blocked |
-| AC-3.2 | No persistent authorization fixture/evidence is available. | ⏸ blocked |
-| AC-3.3 | 30-day unattended run cannot be performed without provider fixture/evidence. | ⏸ blocked |
-| AC-3.4 | No transient provider-failure fixture is available. | ⏸ blocked |
-| AC-4.1 | No Yorkshire Water entry or native reauth incident is present in the live integration list. | ⏸ blocked |
-| AC-4.2 | No reauth flow is available to verify guided-primary hierarchy. | ⏸ blocked |
-| AC-4.3 | No valid provider auth/entry is available to verify retention. | ⏸ blocked |
-| AC-4.4 | No reauth flow is available to cancel/fail. | ⏸ blocked |
-| AC-4.5 | No `Start again` action is available. | ⏸ blocked |
-| AC-4.6 | No Yorkshire Water diagnostic status entity is available. | ⏸ blocked |
-| AC-4.7 | No Yorkshire Water entry is available to inspect Loaded/Setup retry/Needs attention lifecycle. | ⏸ blocked |
-| AC-5.1 | No existing bearer-token Yorkshire Water entry is present. | ⏸ blocked |
-| AC-5.2 | No existing bearer entry is present for next-reauth hierarchy. | ⏸ blocked |
-| AC-5.3 | No migration fixture is present. | ⏸ blocked |
-| AC-6.1 | All token/JSON/OAuth fields are directly exposed in the first form; no guided-primary/advanced-fallback hierarchy. | ❌ fail |
-| AC-6.2 | No valid fallback token supplied. | ⏸ blocked |
+| AC-1.1 | Opened setup; guided-first form makes no persistent/unattended authorization claim. | ✅ pass |
+| AC-1.2 | Looked for maintainer evidence-review surface; none is exposed in the customer browser flow. | ⏸ blocked |
+| AC-1.3 | Opened guided-first flow; it offers guided sign-in and does not promise unattended persistence. | ✅ pass |
+| AC-2.1 | Initial form requests sign-in method plus optional account/meter references; no password, token, code, or verifier field. | ✅ pass |
+| AC-2.2 | Guided step shows `Open Yorkshire Water sign-in (opens a new tab)`, the same selectable URL, and return/paste instructions. Link has `target=_blank` and `rel=noreferrer noopener`. | ✅ pass |
+| AC-2.3 | No valid provider callback/credentials available for connection completion. | ⏸ blocked |
+| AC-2.4 | Submitted `not-a-url`; callback remained available with `Paste the complete final callback URL from Yorkshire Water`. | ✅ pass |
+| AC-2.5 | No provider outage/timeout fixture available. | ⏸ blocked |
+| AC-2.6 | Admin setup works; no second non-admin session supplied. | ⏸ blocked |
+| AC-2.7 | Focused the external link, tabbed to the selectable URL link, then tabbed to the callback textbox; native labels/order observed. | ✅ pass |
+| AC-2.8 | Invalid callback produced `Start again`; with a callback value and Start again checked, submit generated a fresh authorization URL with new challenge/state and removed the checkbox. | ✅ pass |
+| AC-2.9 | No provider denial/cancellation response available. | ⏸ blocked |
+| AC-3.1 | No provider-supported connected entry or expiry fixture. | ⏸ blocked |
+| AC-3.2 | No replacement-token renewal fixture. | ⏸ blocked |
+| AC-3.3 | No 30-day provider-supported test/evidence. | ⏸ blocked |
+| AC-3.4 | No transient provider failure fixture. | ⏸ blocked |
+| AC-4.1 | No Yorkshire Water entry/reauth incident exists in the live integration list. | ⏸ blocked |
+| AC-4.2 | No reauth flow available to inspect. | ⏸ blocked |
+| AC-4.3 | No valid provider auth/entry available to verify retention. | ⏸ blocked |
+| AC-4.4 | No reauth flow available to cancel/fail. | ⏸ blocked |
+| AC-4.5 | Start-again behavior was verified in initial setup; existing-entry preservation cannot be tested without an entry. | ⏸ blocked |
+| AC-4.6 | No diagnostic status entity exists without a completed entry. | ⏸ blocked |
+| AC-4.7 | No completed entry exists for Loaded/Setup retry/Needs attention inspection. | ⏸ blocked |
+| AC-5.1 | No existing bearer-token entry supplied. | ⏸ blocked |
+| AC-5.2 | No existing bearer reauth entry supplied. | ⏸ blocked |
+| AC-5.3 | No migration fixture supplied. | ⏸ blocked |
+| AC-6.1 | Hierarchy works: guided is selected first; choosing the second option opens `Use a temporary access token (advanced)` with an explicit temporary-lifetime warning. The follow-up fix supplies descriptive radio labels for both choices. | ✅ pass |
+| AC-6.2 | No valid temporary token supplied. | ⏸ blocked |
 | AC-6.3 | No fallback entry available to expire. | ⏸ blocked |
-| AC-6.4 | Primary live form exposes OAuth, PKCE, token, verifier, refresh-token/offline-access and DevTools terminology. | ❌ fail |
+| AC-6.4 | Guided form/callback step contains no OAuth, PKCE, token, verifier, scope, or refresh-token terminology. | ✅ pass |
 
 ### Browser-observable NFRs
 
 | Spec ID | Steps performed and observed result | Result |
 |---|---|---|
-| NFR-1 | Integrations and old setup form became interactive promptly at desktop/mobile; approved changed form absent. | ⏸ blocked |
-| NFR-2 | No secret values entered; live form explicitly requests secret-bearing values and DevTools extraction. | ❌ fail |
-| NFR-3 | Fake callback produced old generic experimental validation; active-attempt binding not available. | ⏸ blocked |
-| NFR-4 | Existing controls are labelled, but changed guided form and link order are absent. | ⏸ blocked |
-| NFR-5 | No provider fixture/evidence for 30-day reliability. | ⏸ blocked |
+| NFR-1 | Initial and callback forms became interactive promptly at desktop and mobile sizes; provider timeout not tested. | ✅ pass (local UI) / ⏸ provider timeout blocked |
+| NFR-2 | Guided UI requests no secrets and console stayed clean; retained evidence/log redaction cannot be browser-verified here. | ⏸ blocked |
+| NFR-3 | Malformed callback rejected; Start again generated a fresh attempt. Replay/matching callback not completed. | ⏸ blocked |
+| NFR-4 | External link, callback, and auth-method controls are labelled and keyboard order was verified at desktop and mobile sizes. | ✅ pass (browser UI) |
+| NFR-5 | No 30-day provider fixture/evidence. | ⏸ blocked |
 | NFR-6 | No connected auth incident for duplicate-reauth test. | ⏸ blocked |
-| NFR-7 | No feature lifecycle/status entity; old generic validation only. | ⏸ blocked |
+| NFR-7 | Correctable callback and Start again families observed; provider denial, timeout, lifecycle, and diagnostic status unavailable. | ⏸ blocked |
 | NFR-8 | Spec marks authentication workflow scale N/A. | ✅ pass (spec N/A) |
-| NFR-9 | No approved guided flow available for cleanup test. | ⏸ blocked |
+| NFR-9 | Fresh start visibly changes the authorization attempt; full flow cleanup after completion/entry removal unavailable. | ⏸ blocked |
 
 ## 3. Exploratory Findings
 
 | # | Severity | Steps to reproduce | Expected vs. observed | Status |
 |---|---|---|---|---|
-| B1 | Blocker | Authenticated HA → Settings → Devices & services → Add integration → Yorkshire Water | Expected approved guided flow. Observed pre-feature beta flow with direct token/JSON/OAuth fields and DevTools wording. Live API response schema contains `bearer_token`, `token_response_json`, `oauth_callback_url`, `oauth_authorization_code`, `oauth_code_verifier`, and `oauth_request_offline_access`. | open |
-| B2 | Major | Submit empty form or callback-only fake URL | Expected guided actionable callback validation/restart. Observed old `invalid_auth` / `Enter valid experimental OAuth callback/code details`; no guided attempt or restart. | open |
+| B1 | Minor | Add integration → Yorkshire Water; inspect the initial `Sign-in method` radiogroup at desktop or mobile size | The prior deployed form exposed raw `guided` and `temporary_token` names. The follow-up fix replaces the legacy `vol.In` field with labelled native selector options; rerun browser verification after deployment. | fixed |
 
 ## 4. Console & Network
 
-- Browser console after page load and form submissions: **0 messages, 0 errors, 0 warnings**.
-- Flow POSTs returned HTTP 200, but the response is the old `user` schema rather than the approved guided `auth_method` flow.
-- No provider request was made because no valid provider credentials were supplied and the approved flow was unavailable.
+- Browser console after page load and all tested setup/callback/fallback actions: **0 messages, 0 errors, 0 warnings**.
+- Flow POSTs and cleanup DELETEs returned HTTP 200.
+- Guided flow response schema: required `oauth_callback_url`; placeholders for the labelled external Markdown link and selectable authorization URL.
+- Malformed callback response: `oauth_callback_invalid`, with optional `oauth_start_again`.
+- Start again response: fresh callback form with a new authorization challenge/state.
+- Temporary fallback response schema: `bearer_token` and `token_response_json`; empty submit returns `invalid_auth`.
+- No provider request was completed because no valid Yorkshire Water credentials were supplied.
 
 ## 5. Verdict
 
-> **“Not ready to demo. After a fresh browser run, the host remains healthy and the console is clean, but the live Yorkshire Water integration still serves the pre-feature beta form. The guided sign-in, callback/recovery, fallback hierarchy, native reauthentication, and status surfaces cannot be accepted.”**
+> **“The deployed runtime serves the approved guided and advanced fallback journeys, and the browser-observable callback/restart behavior works at desktop and mobile sizes. The radio-label defect is fixed in the follow-up commit, but provider-backed connection, renewal, native reauthentication/status, and 30-day durability criteria remain unverified without a valid provider fixture.”**
 
-The runtime/deployment still needs to load the approved implementation. Rerun `/demo-day` only after the live flow schema changes from the old token/OAuth fields to the approved guided journey.
+Deploy the follow-up radio-label fix, then rerun the provider-backed and native lifecycle/status checks with approved test data. Do not mark the QA gate passed while Must-story criteria remain blocked.
 
 ---
 
@@ -92,7 +93,7 @@ The runtime/deployment still needs to load the approved implementation. Rerun `/
 
 - [ ] Every Must-story acceptance criterion verified in the real browser and passed
 - [ ] Every browser-observable NFR verified and passed
-- [ ] No open Blocker or Major bugs
+- [x] No open Blocker or Major bugs (one Minor finding listed)
 - [x] Browser console free of errors on the tested flows
 - [x] Tested at desktop and mobile viewport sizes
 - [ ] Status set to `passed`

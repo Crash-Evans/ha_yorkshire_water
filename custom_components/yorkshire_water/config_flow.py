@@ -14,6 +14,12 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .api import (
     YorkshireWaterAPI,
@@ -128,6 +134,25 @@ def _auth_update_mode_schema() -> vol.Schema:
     )
 
 
+def _auth_method_selector() -> SelectSelector:
+    """Return the labelled guided/fallback choice used by setup and reauth."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(
+                    value=AUTH_METHOD_GUIDED,
+                    label="Guided Yorkshire Water sign-in",
+                ),
+                SelectOptionDict(
+                    value=AUTH_METHOD_TEMPORARY_TOKEN,
+                    label="Use a temporary access token (advanced)",
+                ),
+            ],
+            mode=SelectSelectorMode.LIST,
+        )
+    )
+
+
 class YorkshireWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Yorkshire Water."""
 
@@ -171,7 +196,7 @@ class YorkshireWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_AUTH_METHOD,
                         default=AUTH_METHOD_GUIDED,
-                    ): vol.In([AUTH_METHOD_GUIDED, AUTH_METHOD_TEMPORARY_TOKEN]),
+                    ): _auth_method_selector(),
                     vol.Optional(CONF_ACCOUNT_REFERENCE): str,
                     vol.Optional(CONF_METER_REFERENCE): str,
                 }
@@ -369,7 +394,7 @@ class YorkshireWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_AUTH_METHOD,
                         default=AUTH_METHOD_GUIDED,
-                    ): vol.In([AUTH_METHOD_GUIDED, AUTH_METHOD_TEMPORARY_TOKEN]),
+                    ): _auth_method_selector(),
                 }
             ),
         )

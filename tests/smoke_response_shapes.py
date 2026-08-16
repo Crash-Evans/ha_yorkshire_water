@@ -83,6 +83,7 @@ def _load_config_flow_module():
     data_entry_flow = types.ModuleType("homeassistant.data_entry_flow")
     helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
     aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
+    selector = types.ModuleType("homeassistant.helpers.selector")
     voluptuous = types.ModuleType("voluptuous")
 
     class ConfigFlow:
@@ -115,11 +116,31 @@ def _load_config_flow_module():
         def async_create_entry(self, **kwargs):
             return {"type": "create_entry", **kwargs}
 
+    class SelectOptionDict(dict):
+        def __init__(self, *, value, label):
+            super().__init__(value=value, label=label)
+
+    class SelectSelectorConfig:
+        def __init__(self, *, options, mode):
+            self.options = options
+            self.mode = mode
+
+    class SelectSelector:
+        def __init__(self, config):
+            self.config = config
+
+    class SelectSelectorMode:
+        LIST = "list"
+
     config_entries.ConfigFlow = ConfigFlow
     config_entries.ConfigEntry = type("ConfigEntry", (), {})
     config_entries.OptionsFlow = OptionsFlow
     data_entry_flow.FlowResult = dict
     aiohttp_client.async_get_clientsession = lambda hass: None
+    selector.SelectOptionDict = SelectOptionDict
+    selector.SelectSelector = SelectSelector
+    selector.SelectSelectorConfig = SelectSelectorConfig
+    selector.SelectSelectorMode = SelectSelectorMode
     voluptuous.Schema = lambda schema: schema
     voluptuous.Optional = lambda key, **kwargs: key
     voluptuous.Required = lambda key, **kwargs: key
@@ -130,6 +151,7 @@ def _load_config_flow_module():
     sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
     sys.modules["homeassistant.helpers"] = helpers
     sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
+    sys.modules["homeassistant.helpers.selector"] = selector
     sys.modules["voluptuous"] = voluptuous
 
     spec = importlib.util.spec_from_file_location(
@@ -307,6 +329,9 @@ async def _main() -> None:
     assert "CONF_OAUTH_START_AGAIN" in config_flow_source
     assert "authorization_link" in config_flow_source
     assert "oauth_provider_unavailable" in config_flow_source
+    assert "_auth_method_selector" in config_flow_source
+    assert "Guided Yorkshire Water sign-in" in config_flow_source
+    assert "Use a temporary access token (advanced)" in config_flow_source
     config_strings = json.loads(
         (ROOT / "custom_components/yorkshire_water/strings.json").read_text()
     )
