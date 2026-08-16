@@ -157,27 +157,17 @@ Restart Home Assistant, then add Yorkshire Water from Settings -> Devices & Serv
 
 ## Configuration
 
-The current config flow is a beta development flow. It accepts:
+The supported setup starts with guided Yorkshire Water sign-in. Home Assistant opens the provider link in a new tab; after completing portal sign-in, paste the complete final callback URL into the flow. The callback is matched to the active, short-lived sign-in attempt and no password, authorization code, code verifier, token JSON, or browser developer tools are requested.
 
-- A raw temporary `access_token` from a current Yorkshire Water portal session
-- The full token response JSON from DevTools, containing `access_token`, `id_token`, `expires_in`, `token_type`, and `scope`
-- Experimental OAuth PKCE token-exchange inputs: authorization code or callback URL, plus the matching PKCE code verifier
-- Optional account reference
-- Optional meter reference
+Existing beta installations can choose **Use a temporary access token (advanced)** when guided sign-in is unavailable. This fallback lasts only for the token's valid lifetime and returns to guided reauthentication when it expires. Working existing installations are not forced to migrate until their next required reauthentication.
 
-Access tokens expire quickly, typically after about 900 seconds. If you paste the full token response JSON, the integration stores the `access_token` for temporary API use and records a safe expiry timestamp so it can report `token_expired` or `refresh_unavailable` instead of making doomed API calls. The `id_token` is ignored for API calls.
+Access tokens typically expire after about 900 seconds. Persistent unattended renewal is disabled until a redacted live evidence record proves that Yorkshire Water issues a refresh token and accepts renewal after access-token expiry. The exact evidence requirements are in [docs/auth_capability_evidence.md](docs/auth_capability_evidence.md). A provider rejection or temporary outage remains a guided recovery path; it is never presented as durable access.
 
-The OAuth PKCE foundation can exchange an authorization code at `https://login.yorkshirewater.com/connect/token` using the captured Yorkshire Water client ID and redirect URI. A fully automated browser login is not implemented yet because the authorization URL flow still needs more redacted portal capture. If Yorkshire Water includes a `refresh_token` in a token response, the integration stores it and attempts silent refresh before smart meter requests. If no `refresh_token` is present, reauthentication is required when the access token expires.
-
-The captured Yorkshire Water website scope is `openid user-names css-onlineaccount-api css-registration-api`. It does not currently include `offline_access`, which likely explains why no `refresh_token` has been observed. The code includes an experimental scope builder for controlled testing with `offline_access`, but it is not enabled by default. If Yorkshire Water rejects that scope, the integration treats it as `offline_access_not_supported` without exposing secrets.
-
-To test refresh-token support experimentally without deleting the integration, open Settings -> Devices & Services -> Yorkshire Water -> Configure, choose the experimental OAuth/PKCE auth update mode, and tick Experimental: request offline access / refresh token. Open the generated authorization URL, complete the Yorkshire Water login, then paste the final callback URL or authorization code back into Home Assistant with the matching PKCE code verifier. If the token exchange succeeds, check `sensor.yorkshire_water_status` for `refresh_available: true`. Other possible outcomes are `offline_access_not_supported`, or OAuth succeeds but `refresh_available` remains false because Yorkshire Water still did not issue a refresh token.
-
-In current beta mode, `token_expired` or `reauth_required` is expected after the roughly 15-minute access token lifetime unless Yorkshire Water starts issuing a refresh token. Open the Yorkshire Water integration entry in Settings -> Devices & Services and use the reauthentication prompt to paste a fresh full token response JSON or raw access token. A fresh token response updates the stored access token and expiry timestamp, reloads the integration, and sensors should recover without deleting and re-adding Yorkshire Water.
+The integration's diagnostic status entity reports `Connected — data current`, `Update delayed — retrying`, or `Sign-in required — data last updated <time>`, with a non-secret `last_successful_update` attribute. The integration entry itself uses Home Assistant's native Loaded, Setup retry, and Needs attention lifecycle states.
 
 If you provide an account reference but not a meter reference, the integration tries to discover the meter reference from the smart meter meter-details endpoint. If you provide neither reference, the integration remains in endpoint discovery mode.
 
-The integration stores only the access token, optional refresh token, safe expiry timestamp, and configured account or meter references in the Home Assistant config entry. It redacts secrets in integration logs. Do not paste access tokens, ID tokens, refresh tokens, authorization codes, code verifiers, full token responses, account references, meter references, cookies, screenshots, or raw portal captures into GitHub issues or logs.
+The integration stores only the access token, optional evidence-gated refresh token, safe expiry timestamp, and configured account or meter references in the Home Assistant config entry. It redacts secrets in integration logs. Do not paste access tokens, ID tokens, refresh tokens, authorization codes, code verifiers, full token responses, account references, meter references, cookies, screenshots, or raw portal captures into GitHub issues or logs.
 
 ## API Discovery Notes
 

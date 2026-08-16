@@ -9,7 +9,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, SupportsResponse
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -20,7 +20,10 @@ from .api import (
     YorkshireWaterError,
     YorkshireWaterExpiredSessionError,
     YorkshireWaterRefreshUnavailableError,
+    YorkshireWaterRateLimitError,
+    YorkshireWaterUpstreamUnavailableError,
     build_expired_token_status_data,
+    build_delayed_status_data,
 )
 from .const import (
     CONF_ACCOUNT_ID,
@@ -29,6 +32,7 @@ from .const import (
     CONF_METER_ID,
     CONF_METER_REFERENCE,
     CONF_REFRESH_TOKEN,
+    CONF_PERSISTENT_AUTH_ENABLED,
     CONF_SESSION_TOKEN,
     CONF_TOKEN_EXPIRES_AT,
     DEFAULT_SCAN_INTERVAL_HOURS,
@@ -89,6 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         meter_reference=entry.data.get(CONF_METER_REFERENCE),
         token_expires_at=entry.data.get(CONF_TOKEN_EXPIRES_AT),
         refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+        persistent_auth_enabled=bool(entry.data.get(CONF_PERSISTENT_AUTH_ENABLED, False)),
     )
     last_successful_data: dict | None = None
     reauth_started = False
@@ -148,15 +153,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         except YorkshireWaterAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
+        except YorkshireWaterUpstreamUnavailableError as err:
+            _LOGGER.warning("%s", err)
+            if last_successful_data is None:
+                raise ConfigEntryNotReady(
+                    "Yorkshire Water is temporarily unavailable; setup will retry"
+                ) from err
+            return build_delayed_status_data(
+                last_successful_data,
+                account_configured=bool(api.account_reference),
+                meter_configured=bool(api.meter_reference),
+            )
+        except YorkshireWaterRateLimitError as err:
+            _LOGGER.warning("%s", err)
+            if last_successful_data is None:
+                raise ConfigEntryNotReady(
+                    "Yorkshire Water is rate-limited; setup will retry"
+                ) from err
+            return build_delayed_status_data(
+                last_successful_data,
+                account_configured=bool(api.account_reference),
+                meter_configured=bool(api.meter_reference),
+            )
         except YorkshireWaterEndpointNotConfiguredError as err:
             _LOGGER.warning("%s", err)
-            return {
-                "status": "api_discovery_required",
-                "status_detail": str(err),
-                "token_status": "token_valid" if bearer_token else "reauth_required",
-                "account_configured": bool(api.account_reference),
-                "meter_configured": bool(api.meter_reference),
-            }
+            if last_successful_data is None:
+                raise ConfigEntryNotReady(
+                    "Yorkshire Water endpoint discovery is incomplete; setup will retry"
+                ) from err
+            return build_delayed_status_data(
+                last_successful_data,
+                account_configured=bool(api.account_reference),
+                meter_configured=bool(api.meter_reference),
+            )
         except YorkshireWaterError as err:
             raise UpdateFailed(f"Error communicating with Yorkshire Water: {err}") from err
 
@@ -166,6 +195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=DOMAIN,
         update_method=async_update_data,
         update_interval=timedelta(hours=DEFAULT_SCAN_INTERVAL_HOURS),
+        config_entry=entry,
     )
 
     hass.data.setdefault(DOMAIN, {})
@@ -175,10 +205,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
     async_register_import_statistics_service(hass)
 
-    # Avoid blocking setup while the Yorkshire Water endpoint contract is still
-    # being discovered; sensors will show unavailable with a clear coordinator
-    # error until the API layer is completed.
-    await coordinator.async_refresh()
+    # Use Home Assistant's config-entry-aware first refresh so
+    # ConfigEntryNotReady remains native Setup retry instead of being swallowed
+    # by the generic coordinator refresh path.
+    await coordinator.async_config_entry_first_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

@@ -20,6 +20,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import DEFAULT_NAME, DOMAIN
+from .const import (
+    STATUS_CONNECTED_CURRENT,
+    STATUS_SIGN_IN_REQUIRED,
+    STATUS_UPDATE_DELAYED,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -76,6 +81,21 @@ def _cost_attrs(
         "latest_update_date": data.get("latest_update_date"),
         "last_successful_update": data.get("last_successful_update"),
     }
+
+
+def _status_text(data: dict[str, Any]) -> str:
+    """Return the user-facing, non-secret diagnostic status."""
+    status = data.get("status")
+    if status == "update_delayed":
+        return STATUS_UPDATE_DELAYED
+    if status in {"reauth_required", "sign_in_required"}:
+        last_update = data.get("last_successful_update") or "unknown"
+        return STATUS_SIGN_IN_REQUIRED.format(time=last_update)
+    if status == "ok":
+        return STATUS_CONNECTED_CURRENT
+    # Keep the entity contract to the three approved user-facing states even
+    # when an upstream/schema branch adds an internal status value.
+    return STATUS_UPDATE_DELAYED
 
 
 SENSORS: tuple[YorkshireWaterSensorEntityDescription, ...] = (
@@ -373,7 +393,7 @@ SENSORS: tuple[YorkshireWaterSensorEntityDescription, ...] = (
         name="Status",
         icon="mdi:cloud-check-outline",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: data.get("status"),
+        value_fn=_status_text,
         attrs_fn=lambda data: {
             "status_detail": data.get("status_detail"),
             "last_successful_update": data.get("last_successful_update"),

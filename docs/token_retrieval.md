@@ -1,10 +1,10 @@
-# Yorkshire Water Portal Capture Notes
+# Yorkshire Water Portal Capture Notes (maintainer-only)
 
-Yorkshire Water endpoint support is still being discovered. This page is for development captures only; it is not a stable user setup guide yet.
+Yorkshire Water endpoint support is still being discovered. This page is for maintainer-only redacted captures; it is not the supported user setup guide. Users should use the guided Home Assistant sign-in and must not use browser developer tools to obtain tokens.
 
 ## What To Capture
 
-After logging in to the Yorkshire Water portal, use browser developer tools to identify:
+When an authorised maintainer is collecting provider evidence, use a disposable test account and browser developer tools only to identify:
 
 - Authentication flow and token/session lifetime
 - Whether requests use an `Authorization` header, cookies, CSRF tokens, or OAuth
@@ -33,3 +33,7 @@ logger:
 ```
 
 The integration redacts known sensitive fields from its own debug logs, but browser captures are not automatically redacted.
+
+Do not enable persistent authorization from a capture alone. Follow
+`docs/auth_capability_evidence.md` and retain only the secret-free decision
+record; the runtime capability remains disabled until the evidence is approved.

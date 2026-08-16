@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -28,6 +29,8 @@ from .const import (
     YORKSHIRE_WATER_SMART_METER_API_BASE_URL,
     YORKSHIRE_WATER_TOKEN_ENDPOINT,
     YORKSHIRE_WATER_YOUR_USAGE_ENDPOINT_PATH,
+    PERSISTENT_AUTH_EVIDENCE_APPROVED,
+    PERSISTENT_AUTH_EVIDENCE_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,6 +127,42 @@ class YorkshireWaterStateMismatchError(YorkshireWaterAuthError):
 
 class YorkshireWaterOfflineAccessUnsupportedError(YorkshireWaterAuthError):
     """The OAuth server rejected the experimental offline_access scope."""
+
+
+class YorkshireWaterCallbackError(YorkshireWaterAuthError):
+    """A callback could not be safely processed."""
+
+
+class YorkshireWaterCallbackExpiredError(YorkshireWaterCallbackError):
+    """The callback belongs to an expired sign-in attempt."""
+
+
+class YorkshireWaterCallbackMismatchError(YorkshireWaterCallbackError):
+    """The callback does not match the active sign-in attempt."""
+
+
+class YorkshireWaterCallbackDeniedError(YorkshireWaterCallbackError):
+    """The provider denied or the user cancelled authorization."""
+
+
+class YorkshireWaterProviderUnavailableError(YorkshireWaterError):
+    """The provider is temporarily unavailable."""
+
+
+def persistent_authorization_enabled(
+    evidence_id: str | None = None,
+    *,
+    approved: bool | None = None,
+) -> bool:
+    """Return whether persistent authorization has passed the evidence gate."""
+    return bool(
+        (evidence_id if evidence_id is not None else PERSISTENT_AUTH_EVIDENCE_ID)
+        and (
+            approved
+            if approved is not None
+            else PERSISTENT_AUTH_EVIDENCE_APPROVED
+        )
+    )
 
 
 def parse_token_response(data: dict[str, Any]) -> dict[str, Any]:
@@ -244,19 +283,39 @@ def validate_oauth_state(returned_state: str | None, expected_state: str | None)
         raise YorkshireWaterStateMismatchError("Yorkshire Water OAuth state did not match")
 
 
-def extract_authorization_code(callback_url_or_code: str) -> tuple[str, str | None]:
-    """Extract an authorization code and optional state from a callback URL or raw code."""
+def extract_authorization_code(
+    callback_url_or_code: str,
+    *,
+    expected_redirect_uri: str | None = None,
+    expected_state: str | None = None,
+    allow_raw_code: bool = True,
+) -> tuple[str, str | None]:
+    """Extract a code from a callback while optionally enforcing its origin/state."""
     value = callback_url_or_code.strip()
     if not value:
-        raise YorkshireWaterAuthError("Missing Yorkshire Water authorization code")
+        raise YorkshireWaterCallbackError("callback_missing")
     parsed = urlparse(value)
-    if parsed.query:
+    if parsed.scheme or parsed.netloc or parsed.query:
+        if expected_redirect_uri:
+            expected = urlparse(expected_redirect_uri)
+            if (parsed.scheme, parsed.netloc, parsed.path) != (
+                expected.scheme,
+                expected.netloc,
+                expected.path,
+            ):
+                raise YorkshireWaterCallbackMismatchError("callback_origin_mismatch")
         query = parse_qs(parsed.query)
+        if query.get("error"):
+            raise YorkshireWaterCallbackDeniedError("callback_denied")
         code = (query.get("code") or [""])[0]
         state = (query.get("state") or [None])[0]
         if not code:
-            raise YorkshireWaterAuthError("Yorkshire Water callback URL did not include a code")
+            raise YorkshireWaterCallbackError("callback_code_missing")
+        if expected_state and state != expected_state:
+            raise YorkshireWaterCallbackMismatchError("callback_state_mismatch")
         return code, state
+    if not allow_raw_code:
+        raise YorkshireWaterCallbackError("callback_url_required")
     return value, None
 
 
@@ -333,6 +392,25 @@ def build_expired_token_status_data(
         "latest_data_date": latest_data_date,
         "latest_update_date": latest_update_date,
         "last_successful_update": last_successful_update,
+    }
+
+
+def build_delayed_status_data(
+    previous_data: dict[str, Any] | None = None,
+    *,
+    account_configured: bool = False,
+    meter_configured: bool = False,
+) -> dict[str, Any]:
+    """Build a safe retry status while retaining the last successful payload."""
+    return {
+        **(previous_data or {}),
+        "status": "update_delayed",
+        "status_detail": "temporary_provider_failure_retrying",
+        "token_status": "token_valid",
+        "refresh_available": bool((previous_data or {}).get("refresh_available")),
+        "account_configured": account_configured,
+        "meter_configured": meter_configured,
+        "last_successful_update": (previous_data or {}).get("last_successful_update"),
     }
 
 
@@ -720,6 +798,7 @@ class YorkshireWaterAPI:
         meter_reference: str | None = None,
         token_expires_at: str | None = None,
         refresh_token: str | None = None,
+        persistent_auth_enabled: bool | None = None,
     ) -> None:
         """Initialize the API client."""
         self._session = session
@@ -730,6 +809,11 @@ class YorkshireWaterAPI:
         self.meter_reference = self.meter_id
         self.token_expires_at = token_expires_at
         self.refresh_token = refresh_token
+        self.persistent_auth_enabled = (
+            persistent_authorization_enabled()
+            if persistent_auth_enabled is None
+            else persistent_auth_enabled
+        )
         self._pending_auth_update: dict[str, Any] | None = None
         self._last_estimated_cumulative_usage_m3: float | None = None
         self._last_estimated_cumulative_total_litres: float | None = None
@@ -789,7 +873,7 @@ class YorkshireWaterAPI:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Refresh an expired access token when Yorkshire Water issued a refresh token."""
-        if not self.refresh_token:
+        if not self.persistent_auth_enabled or not self.refresh_token:
             raise YorkshireWaterRefreshUnavailableError(
                 "Yorkshire Water access token expired and refresh is unavailable"
             )
@@ -832,8 +916,10 @@ class YorkshireWaterAPI:
                 payload = await response.json(content_type=None)
                 if status >= 400:
                     self._raise_for_token_error(status, payload)
-        except ClientError as err:
-            raise YorkshireWaterError(f"Error communicating with Yorkshire Water: {err}") from err
+        except (ClientError, asyncio.TimeoutError) as err:
+            raise YorkshireWaterUpstreamUnavailableError(
+                "Yorkshire Water token service is temporarily unavailable"
+            ) from err
 
         _ensure_response_shape(endpoint_label, payload, dict)
         _LOGGER.debug(
@@ -846,6 +932,15 @@ class YorkshireWaterAPI:
 
     def _raise_for_token_error(self, status: int, payload: Any) -> None:
         """Map token endpoint errors without exposing response content."""
+        # HTTP transport status is authoritative for transient failures. Some
+        # provider 5xx responses include an ``error`` field (for example
+        # ``server_error``); they must remain retryable rather than becoming a
+        # terminal authentication failure.
+        if status == 429 or status >= 500:
+            raise YorkshireWaterUpstreamUnavailableError(
+                "Yorkshire Water token service is temporarily unavailable"
+            )
+
         if isinstance(payload, dict):
             error_code = str(payload.get("error") or "")
             if error_code in {"invalid_scope", "invalid_request"}:
@@ -853,6 +948,10 @@ class YorkshireWaterAPI:
                     "offline_access_not_supported"
                 )
             if error_code:
+                if error_code in {"invalid_grant", "invalid_token", "expired_token"}:
+                    raise YorkshireWaterExpiredSessionError(
+                        "Yorkshire Water authorization is no longer valid"
+                    )
                 raise YorkshireWaterAuthError("Yorkshire Water token request failed")
 
         if status == 401:
@@ -1338,7 +1437,7 @@ class YorkshireWaterAPI:
         """Refresh an expired token when possible, otherwise raise a safe auth error."""
         if not self.is_token_expired():
             return
-        if self.refresh_token:
+        if self.refresh_token and self.persistent_auth_enabled:
             await self.async_refresh_access_token()
             return
         raise YorkshireWaterRefreshUnavailableError(
@@ -1443,7 +1542,9 @@ class YorkshireWaterAPI:
                 status = response.status
                 payload = await response.json(content_type=None)
         except ClientError as err:
-            raise YorkshireWaterError(f"Error communicating with Yorkshire Water: {err}") from err
+            raise YorkshireWaterUpstreamUnavailableError(
+                "Yorkshire Water upstream service is temporarily unavailable"
+            ) from err
 
         if not isinstance(payload, (dict, list)):
             raise YorkshireWaterSchemaError(

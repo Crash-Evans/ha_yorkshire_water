@@ -815,6 +815,7 @@ def _install_homeassistant_service_stubs() -> None:
     core.HomeAssistant = type("HomeAssistant", (), {})
     core.SupportsResponse = types.SimpleNamespace(ONLY="only")
     exceptions.ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
+    exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     exceptions.ServiceValidationError = type("ServiceValidationError", (Exception,), {})
     cv.entity_id = _validate_entity_id

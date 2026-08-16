@@ -51,6 +51,7 @@ def _load_integration_module():
     core.HomeAssistant = type("HomeAssistant", (), {})
     core.SupportsResponse = types.SimpleNamespace(ONLY="only")
     exceptions.ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
+    exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     aiohttp_client.async_get_clientsession = lambda hass: None
     update_coordinator.DataUpdateCoordinator = type("DataUpdateCoordinator", (), {})
     update_coordinator.UpdateFailed = type("UpdateFailed", (Exception,), {})
@@ -87,6 +88,21 @@ def _load_config_flow_module():
     class ConfigFlow:
         def __init_subclass__(cls, **kwargs):
             return super().__init_subclass__()
+
+        def async_show_form(self, **kwargs):
+            return {"type": "form", **kwargs}
+
+        def async_create_entry(self, **kwargs):
+            return {"type": "create_entry", **kwargs}
+
+        def async_abort(self, **kwargs):
+            return {"type": "abort", **kwargs}
+
+        async def async_set_unique_id(self, unique_id):
+            self._test_unique_id = unique_id
+
+        def _abort_if_unique_id_configured(self):
+            return None
 
     class OptionsFlow:
         @property
@@ -285,10 +301,58 @@ async def _main() -> None:
     assert "default=False" in config_flow_source
     assert "async_step_oauth_start" in config_flow_source
     assert "async_step_oauth_callback" in config_flow_source
+    assert "async_step_temporary_token" in config_flow_source
+    assert "async_step_reauth_method" in config_flow_source
+    assert "async_step_reauth_advanced" in config_flow_source
+    assert "CONF_OAUTH_START_AGAIN" in config_flow_source
+    assert "authorization_link" in config_flow_source
+    assert "oauth_provider_unavailable" in config_flow_source
+    config_strings = json.loads(
+        (ROOT / "custom_components/yorkshire_water/strings.json").read_text()
+    )
+    assert "DevTools" not in config_strings["config"]["step"]["user"]["description"]
+    assert "Use a temporary access token (advanced)" in config_strings["config"]["step"]["temporary_token"]["title"]
+    guided_form_text = json.dumps(
+        {
+            "user": config_strings["config"]["step"]["user"],
+            "oauth_callback": config_strings["config"]["step"]["oauth_callback"],
+            "reauth_confirm": config_strings["config"]["step"]["reauth_confirm"],
+        }
+    )
+    for prohibited in (
+        "DevTools",
+        "authorization code",
+        "code verifier",
+        "token response JSON",
+        "refresh token",
+    ):
+        assert prohibited not in guided_form_text
     assert "async_step_raw_token" in config_flow_source
     assert "async_step_token_json" in config_flow_source
     assert "self.config_entry =" not in config_flow_source
     assert "self._config_entry = config_entry" in config_flow_source
+
+    callback = (
+        "https://my.yorkshirewater.com/account/callback/response?"
+        "code=CODE-REDACTED&state=STATE-REDACTED"
+    )
+    assert api.extract_authorization_code(
+        callback,
+        expected_redirect_uri="https://my.yorkshirewater.com/account/callback/response",
+        expected_state="STATE-REDACTED",
+        allow_raw_code=False,
+    ) == ("CODE-REDACTED", "STATE-REDACTED")
+    try:
+        api.extract_authorization_code(
+            callback,
+            expected_redirect_uri="https://my.yorkshirewater.com/account/callback/response",
+            expected_state="OTHER-STATE",
+            allow_raw_code=False,
+        )
+    except api.YorkshireWaterCallbackMismatchError as err:
+        assert "CODE-REDACTED" not in str(err)
+    else:
+        raise AssertionError("Expected callback state mismatch")
 
     fake_entry = _FakeConfigEntry()
     options_flow = config_flow.YorkshireWaterConfigFlow.async_get_options_flow(fake_entry)
@@ -444,6 +508,28 @@ async def _main() -> None:
         pass
     else:
         raise AssertionError("Expected mismatched OAuth state to be rejected")
+
+    guided_failure_flow = config_flow.YorkshireWaterConfigFlow()
+    guided_failure_flow.hass = _FakeHass()
+    guided_failure_session = _Session(
+        token_payload={"error": "server_error"},
+        token_status=503,
+    )
+    config_flow.async_get_clientsession = lambda hass: guided_failure_session
+    guided_start = await guided_failure_flow.async_step_user(
+        {"auth_method": "guided", "account_reference": "ACCOUNT-REDACTED"}
+    )
+    assert guided_start["step_id"] == "oauth_callback"
+    guided_error = await guided_failure_flow.async_step_oauth_callback(
+        {
+            "oauth_callback_url": (
+                "https://my.yorkshirewater.com/account/callback/response?"
+                f"code=AUTH-CODE-REDACTED&state={guided_failure_flow._oauth_state}"
+            )
+        }
+    )
+    assert guided_error["type"] == "form"
+    assert guided_error["errors"] == {"base": "oauth_provider_unavailable"}
     code, state = api.extract_authorization_code(
         "https://my.yorkshirewater.com/account/callback/response?"
         "code=AUTH-CODE-REDACTED&state=STATE-REDACTED"
@@ -619,6 +705,22 @@ async def _main() -> None:
         "refresh_available": False,
     }
 
+    transient_error_session = _Session(
+        token_payload={"error": "server_error"},
+        token_status=503,
+    )
+    transient_error_client = api.YorkshireWaterAPI(transient_error_session, None)
+    try:
+        await transient_error_client.async_exchange_authorization_code(
+            "AUTH-CODE-REDACTED",
+            "CODE-VERIFIER-REDACTED",
+            now=fixed_now,
+        )
+    except api.YorkshireWaterUpstreamUnavailableError:
+        pass
+    else:
+        raise AssertionError("Expected a 5xx token error payload to remain retryable")
+
     expired_json = json.dumps(
         {
             "id_token": "TOKEN-REDACTED",
@@ -732,8 +834,18 @@ async def _main() -> None:
     cumulative_block = _sensor_block(sensor_source, "estimated_cumulative_usage")
     assert "state_class=SensorStateClass.TOTAL_INCREASING" in cumulative_block
     status_block = _sensor_block(sensor_source, "status")
+    assert "STATUS_CONNECTED_CURRENT" in sensor_source
+    assert "STATUS_UPDATE_DELAYED" in sensor_source
+    assert "STATUS_SIGN_IN_REQUIRED" in sensor_source
+    assert "def _status_text" in sensor_source
     assert '"token_status": data.get("token_status")' in status_block
     assert '"refresh_available": data.get("refresh_available")' in status_block
+    assert "return STATUS_UPDATE_DELAYED" in sensor_source
+    integration_source = (ROOT / "custom_components/yorkshire_water/__init__.py").read_text()
+    assert "ConfigEntryNotReady" in integration_source
+    assert "setup will retry" in integration_source
+    assert "config_entry=entry" in integration_source
+    assert "async_config_entry_first_refresh()" in integration_source
     for cost_key in (
         "yesterday_cost",
         "today_cost",
@@ -794,6 +906,14 @@ async def _main() -> None:
         "last_successful_update": "2026-06-17T12:00:00",
     }
     assert "TOKEN-REDACTED" not in json.dumps(expired_status)
+    delayed_status = api.build_delayed_status_data(
+        {"status": "ok", "last_successful_update": "2026-06-17T12:00:00"},
+        account_configured=True,
+        meter_configured=True,
+    )
+    assert delayed_status["status"] == "update_delayed"
+    assert delayed_status["last_successful_update"] == "2026-06-17T12:00:00"
+    assert "TOKEN-REDACTED" not in json.dumps(delayed_status)
 
     refresh_session = _Session(
         token_payload={
@@ -810,6 +930,7 @@ async def _main() -> None:
         account_reference="ACCOUNT-REDACTED",
         token_expires_at="2000-01-01T00:00:00+00:00",
         refresh_token="TOKEN-REDACTED",
+        persistent_auth_enabled=True,
     )
     refreshed_summary = await refresh_client.async_fetch_usage_summary(
         today=date(2026, 6, 17)
@@ -824,6 +945,33 @@ async def _main() -> None:
     pending_auth = refresh_client.consume_pending_auth_update()
     assert pending_auth["access_token"] == "ACCESS-TOKEN-REDACTED"
     assert pending_auth["refresh_token"] == "TOKEN-REDACTED"
+
+    gated_refresh_client = api.YorkshireWaterAPI(
+        refresh_session,
+        "TOKEN-REDACTED",
+        token_expires_at="2000-01-01T00:00:00+00:00",
+        refresh_token="TOKEN-REDACTED",
+    )
+    try:
+        await gated_refresh_client.async_ensure_valid_token()
+    except api.YorkshireWaterRefreshUnavailableError:
+        pass
+    else:
+        raise AssertionError("Persistent refresh must remain evidence-gated")
+
+    unavailable_client = api.YorkshireWaterAPI(
+        _Session(token_status=503),
+        "TOKEN-REDACTED",
+        token_expires_at="2000-01-01T00:00:00+00:00",
+        refresh_token="TOKEN-REDACTED",
+        persistent_auth_enabled=True,
+    )
+    try:
+        await unavailable_client.async_refresh_access_token()
+    except api.YorkshireWaterUpstreamUnavailableError:
+        pass
+    else:
+        raise AssertionError("Expected transient token service failure")
 
     try:
         api.parse_daily_consumption_response(_fixture("monthly_summary_list_response.json"))

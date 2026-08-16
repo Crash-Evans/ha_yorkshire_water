@@ -3,28 +3,50 @@
     "step": {
       "user": {
         "title": "Yorkshire Water",
-        "description": "Beta development setup: paste either a temporary Yorkshire Water access token, the full token response JSON from DevTools, or experimental OAuth authorization-code details. Optional account and meter references can be supplied if known. Tokens, authorization codes, and code verifiers contain secrets; do not share them.",
+        "description": "Choose the guided Yorkshire Water sign-in journey first. The advanced temporary-token fallback is for existing beta users only.",
         "data": {
-          "bearer_token": "Temporary access token",
-          "token_response_json": "Full token response JSON",
-          "oauth_callback_url": "OAuth callback URL",
-          "oauth_authorization_code": "OAuth authorization code",
-          "oauth_code_verifier": "OAuth PKCE code verifier",
-          "oauth_request_offline_access": "Experimental: request offline access / refresh token",
+          "auth_method": "Sign-in method",
           "account_reference": "Account reference",
           "meter_reference": "Meter reference"
         }
       },
-      "reauth_confirm": {
-        "title": "Reauthenticate Yorkshire Water",
-        "description": "Paste a fresh temporary Yorkshire Water access token, full token response JSON, or experimental OAuth authorization-code details.",
+      "temporary_token": {
+        "title": "Use a temporary access token (advanced)",
+        "description": "This temporary fallback works only for the token's valid lifetime. Guided Yorkshire Water sign-in remains the supported primary journey.",
         "data": {
           "bearer_token": "Temporary access token",
-          "token_response_json": "Full token response JSON",
-          "oauth_callback_url": "OAuth callback URL",
-          "oauth_authorization_code": "OAuth authorization code",
-          "oauth_code_verifier": "OAuth PKCE code verifier",
-          "oauth_request_offline_access": "Experimental: request offline access / refresh token"
+          "token_response_json": "Token response JSON"
+        }
+      },
+      "oauth_callback": {
+        "title": "Sign in to Yorkshire Water",
+        "description": "{authorization_link}\n\nIf the link does not open, select and copy this address:\n{authorization_url}\n\nAfter signing in, paste the complete final callback URL below.",
+        "data": {
+          "oauth_callback_url": "Final callback URL",
+          "oauth_start_again": "Start again"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Yorkshire Water",
+        "description": "{authorization_link}\n\nSign in through Yorkshire Water, then paste the complete final callback URL below. If this attempt has expired, start again.",
+        "data": {
+          "oauth_callback_url": "Final callback URL",
+          "oauth_start_again": "Start again"
+        }
+      },
+      "reauth_method": {
+        "title": "Reauthenticate Yorkshire Water",
+        "description": "Guided Yorkshire Water sign-in is the supported primary journey. The temporary access-token route is an advanced fallback.",
+        "data": {
+          "auth_method": "Sign-in method"
+        }
+      },
+      "reauth_advanced": {
+        "title": "Use a temporary access token (advanced)",
+        "description": "This fallback is temporary and returns to guided reauthentication when the token expires.",
+        "data": {
+          "bearer_token": "Temporary access token",
+          "token_response_json": "Token response JSON"
         }
       }
     },
@@ -32,6 +54,11 @@
       "invalid_auth": "Enter a valid access token",
       "invalid_token_response": "Enter a valid token response JSON object",
       "invalid_oauth": "Enter valid experimental OAuth callback/code details",
+        "oauth_callback_invalid": "Paste the complete final callback URL from Yorkshire Water",
+        "oauth_provider_unavailable": "Yorkshire Water is temporarily unavailable. Try again shortly.",
+      "oauth_attempt_expired": "This sign-in attempt has expired. Choose Start again",
+      "oauth_attempt_mismatch": "This callback does not match the active sign-in attempt. Choose Start again",
+      "oauth_denied": "Yorkshire Water sign-in was cancelled or denied. You can start again",
       "offline_access_not_supported": "Yorkshire Water rejected the experimental offline access scope",
       "id_token_supplied": "This looks like an ID token. Paste the access_token value instead.",
       "token_expired": "The supplied token response is already expired",

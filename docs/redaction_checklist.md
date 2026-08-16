@@ -80,3 +80,10 @@ Before sharing any Yorkshire Water portal capture, check every section below.
 - [ ] Remove full URLs containing sensitive query values.
 - [ ] Replace request and response body values with fake values.
 - [ ] Check the HAR with a text search for your name, email, postcode, address, account number, and meter serial.
+
+## Home Assistant forms, logs, and status evidence
+
+- [ ] Confirm guided setup and reauthentication forms contain no passwords, access tokens, token JSON, authorization codes, code verifiers, refresh tokens, or full callback values in labels, descriptions, errors, or placeholders.
+- [ ] Confirm callback errors retain only a safe error family such as malformed, expired/mismatched, denied/cancelled, or temporarily unavailable.
+- [ ] Confirm diagnostic status and `last_successful_update` contain no token, callback, account, customer, or meter secrets.
+- [ ] Confirm the persistent-authorisation evidence record contains only scope names, status/error codes, token-presence booleans, expiry timing, and the approved decision.

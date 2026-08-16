@@ -21,9 +21,12 @@ CONF_OAUTH_CALLBACK_URL = "oauth_callback_url"
 CONF_OAUTH_CODE_VERIFIER = "oauth_code_verifier"
 CONF_OAUTH_REQUEST_OFFLINE_ACCESS = "oauth_request_offline_access"
 CONF_REFRESH_TOKEN = "refresh_token"
+CONF_PERSISTENT_AUTH_ENABLED = "persistent_auth_enabled"
 CONF_SESSION_TOKEN = "session_token"
 CONF_TOKEN_EXPIRES_AT = "token_expires_at"
 CONF_TOKEN_RESPONSE_JSON = "token_response_json"
+CONF_OAUTH_START_AGAIN = "oauth_start_again"
+CONF_AUTH_METHOD = "auth_method"
 
 AUTH_UPDATE_MODE_OAUTH_PKCE = "oauth_pkce"
 AUTH_UPDATE_MODE_RAW_TOKEN = "raw_token"
@@ -33,8 +36,21 @@ AUTH_TYPE_BEARER_TOKEN = "bearer_token"
 AUTH_TYPE_OAUTH_PKCE = "oauth_pkce"
 AUTH_TYPE_SESSION_TOKEN = "session_token"
 
+AUTH_METHOD_GUIDED = "guided"
+AUTH_METHOD_TEMPORARY_TOKEN = "temporary_token"
+
 DEFAULT_NAME = "Yorkshire Water"
 DEFAULT_SCAN_INTERVAL_HOURS = 6
+OAUTH_ATTEMPT_TTL_SECONDS = 600
+
+# Persistent authorization is deliberately disabled until a redacted live
+# evidence record proves both refresh-token issuance and post-expiry renewal.
+PERSISTENT_AUTH_EVIDENCE_ID = ""
+PERSISTENT_AUTH_EVIDENCE_APPROVED = False
+
+STATUS_CONNECTED_CURRENT = "Connected — data current"
+STATUS_UPDATE_DELAYED = "Update delayed — retrying"
+STATUS_SIGN_IN_REQUIRED = "Sign-in required — data last updated {time}"
 
 # Discovered Yorkshire Water portal routes. Response schemas are still unknown,
 # so production data fetch methods remain disabled below until redacted response
